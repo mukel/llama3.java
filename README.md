@@ -1,6 +1,6 @@
 # Llama3.java
 
-Practical [Llama 3](https://github.com/meta-llama/llama3) inference implemented in a single file of pure Java.
+Practical [Llama 3](https://github.com/meta-llama/llama3) inference implemented in a single Java file.
 
 <p align="center">
   <img width="700" src="https://github.com/mukel/llama3.java/assets/1896283/7939588c-c0ff-4261-b67f-8a54bad59ab5">
@@ -60,7 +60,7 @@ jbang Llama3.java --help
 ```
 Or execute directly, also via [`jbang`](https://www.jbang.dev/):
 ```bash 
-chmod -x Llama3.java
+chmod +x Llama3.java
 ./Llama3.java --help
 ```
 
@@ -120,7 +120,7 @@ jbang Llama3.java \
 | Model                            | tokens/s | Implementation   |  
 |----------------------------------|----------|------------------|
 | Llama-3-8B-Instruct-Q4_0.gguf    | 7.53     | llama.cpp        |
-| Llama-3-8B-Instruct-Q4_0.gguf    | 6.78     | llama3.java      |
+| Llama-3-8B-Instruct-Q4_0.gguf    | 6.95     | llama3.java      |
 | Llama-3-8B-Instruct-Q8_0.gguf    | 5.16     | llama.cpp        |
 | Llama-3-8B-Instruct-Q8_0.gguf    | 4.02     | llama3.java      |
 
