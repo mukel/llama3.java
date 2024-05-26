@@ -1,7 +1,8 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
-//JAVA 21
-//COMPILE_OPTIONS --enable-preview -source 21 --add-modules=jdk.incubator.vector
-//RUNTIME_OPTIONS --enable-preview --add-modules=jdk.incubator.vector
+//JAVA 21+
+//PREVIEW
+//COMPILE_OPTIONS --add-modules=jdk.incubator.vector
+//RUNTIME_OPTIONS --add-modules=jdk.incubator.vector
 
 // Practical Llama 3 inference in a single Java file
 // Author: Alfonso² Peterssen
@@ -1584,45 +1585,6 @@ final class Q8_0FloatTensor extends FloatTensor {
     }
 }
 
-final class F32FloatTensor extends FloatTensor {
-
-    final int size;
-    final MemorySegment memorySegment;
-
-    F32FloatTensor(int size, MemorySegment memorySegment) {
-        this.size = size;
-        this.memorySegment = memorySegment;
-    }
-
-    @Override
-    int size() {
-        return size;
-    }
-
-    @Override
-    public GGMLType type() {
-        return GGMLType.F32;
-    }
-
-    @Override
-    public FloatVector getFloatVector(VectorSpecies<Float> species, int index) {
-        if (!USE_VECTOR_API) {
-            throw new UnsupportedOperationException();
-        }
-        return FloatVector.fromMemorySegment(species, memorySegment, index * (long) Float.BYTES, ByteOrder.LITTLE_ENDIAN);
-    }
-
-    @Override
-    public float getFloat(int index) {
-        return memorySegment.getAtIndex(JAVA_FLOAT_LE, index);
-    }
-
-    @Override
-    public void setFloat(int index, float value) {
-        memorySegment.setAtIndex(JAVA_FLOAT_LE, index, value);
-    }
-}
-
 final class ArrayFloatTensor extends FloatTensor {
 
     final float[] values;
@@ -1931,9 +1893,10 @@ public class Llama3 {
     }
 
     static void runInteractive(Llama model, Sampler sampler, Options options) {
-        Llama.State state = model.createNewState();
+        Llama.State state = null;
         List<Integer> conversationTokens = new ArrayList<>();
         ChatFormat chatFormat = new ChatFormat(model.tokenizer());
+        conversationTokens.add(chatFormat.beginOfText);
         if (options.systemPrompt() != null) {
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
         }
@@ -1945,6 +1908,9 @@ public class Llama3 {
             String userText = in.nextLine();
             if (List.of("quit", "exit").contains(userText)) {
                 break;
+            }
+            if (state == null) {
+                state = model.createNewState();
             }
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, userText)));
             conversationTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
@@ -1980,6 +1946,7 @@ public class Llama3 {
         ChatFormat chatFormat = new ChatFormat(model.tokenizer());
 
         List<Integer> promptTokens = new ArrayList<>();
+        promptTokens.add(chatFormat.beginOfText);
         if (options.systemPrompt() != null) {
             promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
         }
@@ -2034,7 +2001,7 @@ public class Llama3 {
             out.println("  --temperature, -temp <float>  temperature in [0,inf], default 0.1");
             out.println("  --top-p <float>               p value in top-p (nucleus) sampling in [0,1] default 0.95");
             out.println("  --seed <long>                 random seed, default System.nanoTime()");
-            out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default -1");
+            out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default 512");
             out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
             out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
             out.println();
@@ -2053,7 +2020,8 @@ public class Llama3 {
             float topp = 0.95f;
             Path modelPath = null;
             long seed = System.nanoTime();
-            int maxTokens = -1; // limited by context length
+            // Keep max context length small for low-memory devices.
+            int maxTokens = 512;
             boolean interactive = false;
             boolean stream = true;
             boolean echo = false;
