@@ -64,12 +64,18 @@ chmod +x Llama3.java
 ./Llama3.java --help
 ```
 
+## Run from source
+
+```bash
+java --enable-preview --source 21 --add-modules jdk.incubator.vector LLama3.java -i --model Meta-Llama-3-8B-Instruct-Q4_0.gguf
+```
+
 #### Optional: Makefile + manually build and run
 
 A simple [Makefile](./Makefile) is provided, run `make` to produce `llama3.jar` or manually:
 ```bash
 javac -g --enable-preview -source 21 --add-modules jdk.incubator.vector -d target/classes Llama3.java
-jar -cvfe llama3.jar com.llama4j.Llama3 LICENSE -C target/classes .
+jar -cvfe llama3.jar Llama3 LICENSE -C target/classes .
 ```
 
 Run the resulting `llama3.jar` as follows: 
