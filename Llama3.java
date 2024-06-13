@@ -1475,11 +1475,11 @@ abstract class FloatTensor {
     }
 
     float sum(int thisOffset, int size) {
-        return reduce(thisOffset, size, Float.MIN_VALUE, Float::sum);
+        return reduce(thisOffset, size, 0f, Float::sum);
     }
 
     float max(int thisOffset, int size) {
-        return reduce(thisOffset, size, Float.MIN_VALUE, Float::max);
+        return reduce(thisOffset, size, Float.NEGATIVE_INFINITY, Float::max);
     }
 
     void copyTo(int thisOffset, FloatTensor that, int thatOffset, int size) {
