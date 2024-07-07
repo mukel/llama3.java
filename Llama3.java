@@ -1092,6 +1092,12 @@ class Tokenizer {
     private final Vocabulary vocabulary;
     private final Map<Pair<Integer, Integer>, Integer> merges;
     private final Map<String, Integer> specialTokens;
+    /** buffer to store incomplete UTF-8 sequence */
+    private final byte[] bufUtf8 = new byte[4];
+    /** index in UTF-8 buffer */
+    private int bufUtf8Index = 0;
+    /** number of expected bytes in UTF-8 buffer */
+    private int bufUtf8Size = 0;
 
     public String regexPattern() {
         if (compiledPattern == null) {
@@ -1324,11 +1330,37 @@ class Tokenizer {
     public String decode(List<Integer> tokens) {
         String decoded = decodeImpl(tokens);
         int[] decodedBytesAsInts = decoded.codePoints().map(BYTE_DECODER::get).toArray();
-        byte[] rawBytes = new byte[decodedBytesAsInts.length];
+        byte[] rawBytes = new byte[decodedBytesAsInts.length + 3];
+        int indexRawByte = 0;
         for (int i = 0; i < decoded.length(); i++) {
-            rawBytes[i] = (byte) decodedBytesAsInts[i];
+            byte b = (byte) decodedBytesAsInts[i];
+            if ((b & 0b11100000) == 0b11000000 && bufUtf8Index == 0) {
+                bufUtf8Size = 2; // Start of UTF-8 two bytes sequence.
+                bufUtf8[bufUtf8Index++] = b;
+                continue;
+            }
+            if ((b & 0b11110000) == 0b11100000 && bufUtf8Index == 0) {
+                bufUtf8Size = 3; // Start of UTF-8 three bytes sequence.
+                bufUtf8[bufUtf8Index++] = b;
+                continue;
+            }
+            if ((b & 0b11111000) == 0b11110000 && bufUtf8Index == 0) {
+                bufUtf8Size = 4; // Start of UTF-8 four bytes sequence.
+                bufUtf8[bufUtf8Index++] = b;
+                continue;
+            }
+            if (bufUtf8Index > 0) {
+                bufUtf8[bufUtf8Index++] = b;
+                if (bufUtf8Index == bufUtf8Size) {
+                    System.arraycopy(bufUtf8, 0, rawBytes, indexRawByte, bufUtf8Size);
+                    indexRawByte += bufUtf8Size;
+                    bufUtf8Index = 0;
+                }
+                continue;
+            }
+            rawBytes[indexRawByte++] = b;
         }
-        return new String(rawBytes, StandardCharsets.UTF_8);
+        return new String(rawBytes, 0, indexRawByte, StandardCharsets.UTF_8);
     }
 }
 
