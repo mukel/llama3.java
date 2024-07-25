@@ -4,7 +4,7 @@
 //COMPILE_OPTIONS --add-modules=jdk.incubator.vector
 //RUNTIME_OPTIONS --add-modules=jdk.incubator.vector
 
-// Practical Llama 3 inference in a single Java file
+// Practical Llama 3 (and 3.1) inference in a single Java file
 // Author: Alfonso² Peterssen
 // Based on Andrej Karpathy's llama2.c and minbpe projects
 //
@@ -681,12 +681,17 @@ final class ModelLoader {
                     (float) metadata.getOrDefault("llama.rope.freq_base", 10000f)
             );
 
-            Map<String, GGMLTensorEntry> tensorEntries = gguf.getTensorEntries();
-
-            Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(config.contextLength, config.headSize, config.ropeTheta);
+            boolean ropeScaling = "Meta-Llama-3.1".equals(metadata.get("general.basename"));
+            float scaleFactor = 8;
+            float loFreqFactor = 1;
+            float hiFreqFactor = 3;
+            int oldContextLength = 8192;
+            Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(config.contextLength, config.headSize, config.ropeTheta,
+                    ropeScaling, scaleFactor, loFreqFactor, hiFreqFactor, oldContextLength);
             float[] ropeFreqsReal = ropeFreqs.first();
             float[] ropeFreqsImag = ropeFreqs.second();
 
+            Map<String, GGMLTensorEntry> tensorEntries = gguf.getTensorEntries();
             Llama.Weights qw = new Llama.Weights(
                     loadQuantized(tensorEntries.get("token_embd.weight")),
                     loadArrayOfFloatBuffer(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_norm.weight")),
@@ -1848,7 +1853,8 @@ final class ArrayFloatTensor extends FloatTensor {
 }
 
 final class RoPE {
-    public static Pair<float[], float[]> precomputeFreqsCis(int contextLength, int headSize, double theta) {
+    public static Pair<float[], float[]> precomputeFreqsCis(int contextLength, int headSize, double theta,
+        boolean ropeScaling, float scaleFactor, float loFreqFactor, float hiFreqFactor, float oldContextLength) {
         assert headSize % 2 == 0;
         float[] cr = new float[contextLength * (headSize / 2)];
         float[] ci = new float[contextLength * (headSize / 2)];
@@ -1856,6 +1862,20 @@ final class RoPE {
         for (int pos = 0; pos < contextLength; ++pos) {
             for (int i = 0; i < headSize; i += 2) {
                 float freq = (float) (1.0 / Math.pow(theta, i / (double) headSize));
+                if (ropeScaling) {
+                    // Llama 3.1 scaling
+                    float loFreqWavelen = oldContextLength / loFreqFactor;
+                    float hiFreqWavelen = oldContextLength / hiFreqFactor;
+                    float wavelen = (float) (2.0 * Math.PI / freq);
+                    if (wavelen < hiFreqWavelen) {
+                        freq = freq;
+                    } else if (wavelen > loFreqWavelen) {
+                        freq = freq / scaleFactor;
+                    } else {
+                        float smooth = (oldContextLength / wavelen - loFreqFactor) / (hiFreqFactor - loFreqFactor);
+                        freq = (1.0f - smooth) * freq / scaleFactor + smooth * freq;
+                    }
+                }
                 float val = pos * freq;
                 cr[n] = (float) Math.cos(val);
                 ci[n] = (float) Math.sin(val);
@@ -2014,6 +2034,7 @@ class ChatFormat {
     protected final int startHeader;
     protected final int endOfTurn;
     protected final int endOfText;
+    protected final int endOfMessage;
 
     public ChatFormat(Tokenizer tokenizer) {
         this.tokenizer = tokenizer;
@@ -2023,6 +2044,7 @@ class ChatFormat {
         this.endHeader = specialTokens.get("<|end_header_id|>");
         this.endOfTurn = specialTokens.get("<|eot_id|>");
         this.endOfText = specialTokens.get("<|end_of_text|>");
+        this.endOfMessage = specialTokens.get("<|eom_id|>");
     }
 
     public Tokenizer getTokenizer() {
