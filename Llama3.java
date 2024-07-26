@@ -16,6 +16,7 @@
 // jbang Llama3.java --help
 //
 // Enjoy!
+package com.llama4j;
 
 import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.FloatVector;
