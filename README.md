@@ -31,8 +31,8 @@ Here's the interactive `--chat` mode in action:
 ## Setup
 
 Download pure `Q4_0` and (optionally) `Q8_0` quantized .gguf files from:  
-https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF
-https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF
+  - https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF
+  - https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF
 
 The `~4.3GB` pure `Q4_0` quantized model is recommended, please be gentle with [huggingface.co](https://huggingface.co) servers: 
 ```
