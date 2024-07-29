@@ -2045,7 +2045,7 @@ class ChatFormat {
         this.endHeader = specialTokens.get("<|end_header_id|>");
         this.endOfTurn = specialTokens.get("<|eot_id|>");
         this.endOfText = specialTokens.get("<|end_of_text|>");
-        this.endOfMessage = specialTokens.get("<|eom_id|>");
+        this.endOfMessage = specialTokens.getOrDefault("<|eom_id|>", -1); // only in 3.1
     }
 
     public Tokenizer getTokenizer() {
