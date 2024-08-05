@@ -728,7 +728,7 @@ final class ModelLoader {
 
         int allTokens = vocabulary.size();
         int baseTokens = 128000; // assume all tokens after the base ones are special.
-        //int reservedSpecialTokens = allTokens - baseTokens;
+
         List<String> specialTokensList = Arrays.stream(vocabulary.tokens(), baseTokens, allTokens).toList();
 
         assert specialTokensList.stream().allMatch(token -> vocabulary.getIndex(token).isPresent());
@@ -1868,15 +1868,13 @@ final class RoPE {
                 if (ropeScaling) {
                     // Llama 3.1 scaling
                     float loFreqWavelen = oldContextLength / loFreqFactor;
-                    //float hiFreqWavelen = oldContextLength / hiFreqFactor;
+                    float hiFreqWavelen = oldContextLength / hiFreqFactor;
                     float wavelen = (float) (2.0 * Math.PI / freq);
                    
                     //This doesn't do anything, so it triggers a warning.
-                    /*if (wavelen < hiFreqWavelen) {
+                    if (wavelen < hiFreqWavelen) {
                         freq = freq;
-                    } else */
-                    
-                    if (wavelen > loFreqWavelen) {
+                    } else  if (wavelen > loFreqWavelen) {
                         freq = freq / scaleFactor;
                     } else {
                         float smooth = (oldContextLength / wavelen - loFreqFactor) / (hiFreqFactor - loFreqFactor);
