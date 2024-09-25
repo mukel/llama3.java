@@ -98,6 +98,33 @@ Run the resulting `llama3.jar` as follows:
 java --enable-preview --add-modules jdk.incubator.vector -jar llama3.jar --help
 ```
 
+### GraalVM
+
+Build a jar:
+```bash
+javac -g --enable-preview --source 24 --add-modules jdk.incubator.vector -d target/classes Llama3.java
+jar -cvfe ./target/llama3.jar com.llama4j.Llama3 LICENSE -C target/classes .
+```
+
+Run on JIT: 
+
+```bash
+java --enable-preview --add-modules jdk.incubator.vector -jar ./target/llama3.jar --model Meta-Llama-3.1-8B-Instruct-Q4_0.gguf --chat
+```
+Compile to Native Image:
+
+```bash
+native-image --enable-preview --add-modules jdk.incubator.vector -H:+ForeignAPISupport -jar ./target/llama3.jar -o ./target/llama3
+```
+<!-- To be added: `-H:+VectorAPISupport` -->
+
+Run as Native Image:
+
+```bash
+./llama3 --model Meta-Llama-3.1-8B-Instruct-Q4_0.gguf --chat
+```
+
+
 ## Performance
 
 **Important Note**  
