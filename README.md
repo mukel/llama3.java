@@ -127,9 +127,7 @@ Run as Native Image:
 
 ## Performance
 
-**Important Note**  
-On GraalVM, please note that the Graal compiler doesn't support the Vector API yet, run with `-Dllama.VectorAPI=false`, but expect sub-optimal performance.   
-Vanilla OpenJDK 21+ is recommended for now, which supports the Vector API.
+GraalVM now supports more [Vector API](https://openjdk.org/jeps/338) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from graalvm.org or sdkman: `sdk install java 24.ea.12-graal`.
 
 ### llama.cpp
 
