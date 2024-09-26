@@ -1,6 +1,6 @@
 # Llama3.java
 
-Practical [Llama 3](https://github.com/meta-llama/llama3) and [3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1) inference implemented in a single Java file.
+Practical [Llama 3](https://github.com/meta-llama/llama3), [3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1) and [3.2](https://ai.meta.com/blog/llama-3-2-connect-2024-vision-edge-mobile-devices/) inference implemented in a single Java file.
 
 <p align="center">
   <img width="700" src="https://github.com/mukel/llama3.java/assets/1896283/7939588c-c0ff-4261-b67f-8a54bad59ab5">
@@ -17,7 +17,7 @@ Besides the educational value, this project will be used to test and tune compil
  - [GGUF format](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) parser
  - Llama 3 tokenizer based on [minbpe](https://github.com/karpathy/minbpe)
  - Llama 3 inference with Grouped-Query Attention
- - Support Llama 3.1 (ad-hoc RoPE scaling)
+ - Support Llama 3.1 (ad-hoc RoPE scaling) and 3.2 (tie word embeddings)
  - Support for Q8_0 and Q4_0 quantizations
  - Fast matrix-vector multiplication routines for quantized tensors using Java's [Vector API](https://openjdk.org/jeps/469)
  - Simple CLI with `--chat` and `--instruct` modes.
@@ -30,28 +30,36 @@ Here's the interactive `--chat` mode in action:
 
 ## Setup
 
-Download pure `Q4_0` and (optionally) `Q8_0` quantized .gguf files from:  
+Download pure `Q4_0` and (optionally) `Q8_0` quantized .gguf files from:
+  - https://huggingface.co/mukel/Llama-3.2-1B-Instruct-GGUF
+  - https://huggingface.co/mukel/Llama-3.2-3B-Instruct-GGUF
   - https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF
   - https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF
 
-The `~4.3GB` pure `Q4_0` quantized model is recommended, please be gentle with [huggingface.co](https://huggingface.co) servers: 
+The pure `Q4_0` quantized models are recommended, except for the very small models (1B), please be gentle with [huggingface.co](https://huggingface.co) servers: 
 ```
-# Llama 3.1
+# Llama 3.2 (3B)
+curl -L -O https://huggingface.co/mukel/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_0.gguf
+
+# Llama 3.2 (1B)
+curl -L -O https://huggingface.co/mukel/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q8_0.gguf
+
+# Llama 3.1 (8B)
 curl -L -O https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_0.gguf
 
-# Llama 3
+# Llama 3 (8B)
 curl -L -O https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q4_0.gguf
 
-# Optionally download the Q8_0 quantized model ~8GB
-# curl -L -O https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q8_0.gg
+# Optionally download the Q8_0 quantized models
+# curl -L -O https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q8_0.gguf
 # curl -L -O https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf
 ```
 
 #### Optional: quantize to pure `Q4_0` manually
 
-In the wild, `Q8_0` quantizations are fine, but `Q4_0` quantizations are rarely pure e.g. the `output.weights` tensor is quantized with `Q6_K`, instead of `Q4_0`.  
+In the wild, `Q8_0` quantizations are fine, but `Q4_0` quantizations are rarely pure e.g. the `token_embd.weights`/`output.weights` tensor are quantized with `Q6_K`, instead of `Q4_0`.  
 A **pure** `Q4_0` quantization can be generated from a high precision (F32, F16, BFLOAT16) .gguf source 
-with the `quantize` utility from [llama.cpp](https://github.com/ggerganov/llama.cpp) as follows:
+with the `llama-quantize` utility from [llama.cpp](https://github.com/ggerganov/llama.cpp) as follows:
 
 ```bash
 ./llama-quantize --pure ./Meta-Llama-3-8B-Instruct-F32.gguf ./Meta-Llama-3-8B-Instruct-Q4_0.gguf Q4_0

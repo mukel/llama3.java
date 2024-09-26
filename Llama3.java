@@ -693,8 +693,9 @@ final class ModelLoader {
             float[] ropeFreqsImag = ropeFreqs.second();
 
             Map<String, GGMLTensorEntry> tensorEntries = gguf.getTensorEntries();
+            GGMLTensorEntry tokenEmbeddings = tensorEntries.get("token_embd.weight");
             Llama.Weights qw = new Llama.Weights(
-                    loadQuantized(tensorEntries.get("token_embd.weight")),
+                    loadQuantized(tokenEmbeddings),
                     loadArrayOfFloatBuffer(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_norm.weight")),
                     loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_q.weight")),
                     loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_k.weight")),
@@ -707,7 +708,9 @@ final class ModelLoader {
                     toFloatBuffer(tensorEntries.get("output_norm.weight")),
                     FloatBuffer.wrap(ropeFreqsReal),
                     FloatBuffer.wrap(ropeFreqsImag),
-                    loadQuantized(tensorEntries.get("output.weight"))
+                    // If "output.weight" is not present then the embedding weights are tied/shared with the decoder.
+                    // This is commonly referred as "tie word embeddings".
+                    loadQuantized(tensorEntries.getOrDefault("output.weight", tokenEmbeddings))
             );
 
             return new Llama(config, tokenizer, qw);
