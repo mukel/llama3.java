@@ -3,6 +3,7 @@
 //PREVIEW
 //COMPILE_OPTIONS --add-modules=jdk.incubator.vector
 //RUNTIME_OPTIONS --add-modules=jdk.incubator.vector
+//MAIN com.llama4j.Llama3
 
 // Practical Llama 3 (and 3.1) inference in a single Java file
 // Author: Alfonso² Peterssen
@@ -22,12 +23,14 @@ import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.FloatVector;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
+import sun.misc.Unsafe;
 
 import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -1430,10 +1433,33 @@ enum GGMLType {
  * e.g. can represent a sequence of quantized floats.
  */
 abstract class FloatTensor {
-    static final ValueLayout.OfFloat JAVA_FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
-    static final ValueLayout.OfShort JAVA_SHORT_LE = ValueLayout.JAVA_SHORT.withOrder(ByteOrder.LITTLE_ENDIAN);
-
     static final boolean USE_VECTOR_API = Boolean.parseBoolean(System.getProperty("llama.VectorAPI", "true"));
+
+    // static final ValueLayout.OfFloat JAVA_FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
+    // static final ValueLayout.OfShort JAVA_SHORT_LE = ValueLayout.JAVA_SHORT.withOrder(ByteOrder.LITTLE_ENDIAN);
+
+   
+    // The use of Unsafe in this file is a temporary workaround to support native-image.
+    static final Unsafe UNSAFE;
+    static {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            UNSAFE = (Unsafe) f.get(null);
+        } catch (NoSuchFieldException | IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    static short readShort(MemorySegment memorySegment, long offset) {
+        // The MemorySegment.get* methods should be used instead.
+        return UNSAFE.getShort(memorySegment.address() + offset);
+    }
+
+    static byte readByte(MemorySegment memorySegment, long offset) {
+        // The MemorySegment.get* methods should be used instead.
+        return UNSAFE.getByte(memorySegment.address() + offset);
+    } 
 
     // Preferred vector size for the fast multiplication routines.
     // (Apple Silicon) NEON only supports up-to 128bit vectors.
@@ -1629,13 +1655,13 @@ final class Q4_0FloatTensor extends FloatTensor {
         assert 0 <= index && index < size;
         int blockIndex = index / GGMLType.Q4_0.getBlockSize();
         int blockOffset = blockIndex * GGMLType.Q4_0.getTypeSize();
-        float scale = Float.float16ToFloat(memorySegment.get(JAVA_SHORT_LE, blockOffset));
+        float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
         byte quant;
         int modIndex = index % GGMLType.Q4_0.getBlockSize();
         if (modIndex < GGMLType.Q4_0.getBlockSize() / 2) {
-            quant = (byte) (memorySegment.get(ValueLayout.JAVA_BYTE, blockOffset + Float16.BYTES + modIndex) & 0x0F);
+            quant = (byte) (readByte(memorySegment, blockOffset + Float16.BYTES + modIndex) & 0x0F);
         } else {
-            quant = (byte) ((memorySegment.get(ValueLayout.JAVA_BYTE, blockOffset + Float16.BYTES + modIndex - GGMLType.Q4_0.getBlockSize() / 2) >>> 4) & 0x0F);
+            quant = (byte) ((readByte(memorySegment, blockOffset + Float16.BYTES + modIndex - GGMLType.Q4_0.getBlockSize() / 2) >>> 4) & 0x0F);
         }
         quant -= 8;
         return quant * scale;
@@ -1644,13 +1670,13 @@ final class Q4_0FloatTensor extends FloatTensor {
     @Override
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
         if (FloatTensor.USE_VECTOR_API) {
-            return vectorDot(this, thisOffset, that, thatOffset, size);
+            return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
         } else {
             return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
         }
     }
 
-    private static float vectorDot(Q4_0FloatTensor thiz, int thisOffset, FloatTensor that, int thatOffset, int size) {
+    private static float vectorDot(Q4_0FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
         float result = 0f;
         int j = 0;
 
@@ -1667,7 +1693,7 @@ final class Q4_0FloatTensor extends FloatTensor {
         int blockOffset = (thisOffset + j) / GGMLType.Q4_0.getBlockSize() * GGMLType.Q4_0.getTypeSize();
         int upperBound = size / GGMLType.Q4_0.getBlockSize() * GGMLType.Q4_0.getBlockSize();
         for (; j < upperBound; j += GGMLType.Q4_0.getBlockSize(), blockOffset += GGMLType.Q4_0.getTypeSize()) {
-            float wScaleValue = Float.float16ToFloat(thiz.memorySegment.get(JAVA_SHORT_LE, blockOffset));
+            float wScaleValue = Float.float16ToFloat(readShort(thiz.memorySegment, blockOffset));
             var wScale = FloatVector.broadcast(F_SPECIES, wScaleValue);
             var B_SPECIES = ByteVector.SPECIES_128;
             var wBytes = ByteVector.fromMemorySegment(B_SPECIES, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
@@ -1740,8 +1766,8 @@ final class Q8_0FloatTensor extends FloatTensor {
         int blockIndex = index / GGMLType.Q8_0.getBlockSize();
         int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
         int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
-        byte quant = memorySegment.get(ValueLayout.JAVA_BYTE, blockOffset + Float16.BYTES + withinBlockIndex);
-        float scale = Float.float16ToFloat(memorySegment.get(JAVA_SHORT_LE, blockOffset));
+        byte quant = readByte(memorySegment, blockOffset + Float16.BYTES + withinBlockIndex);
+        float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
         return quant * scale;
     }
 
@@ -1750,13 +1776,13 @@ final class Q8_0FloatTensor extends FloatTensor {
     @Override
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
         if (FloatTensor.USE_VECTOR_API) {
-            return vectorDot(this, thisOffset, that, thatOffset, size);
+            return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
         } else {
             return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
         }
     }
 
-    private static float vectorDot(Q8_0FloatTensor thiz, int thisOffset, FloatTensor that, int thatOffset, int size) {
+    private static float vectorDot(Q8_0FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
         float result = 0f;
         int j = 0;
 
@@ -1773,7 +1799,7 @@ final class Q8_0FloatTensor extends FloatTensor {
         int blockOffset = (thisOffset + j) / GGMLType.Q8_0.getBlockSize() * GGMLType.Q8_0.getTypeSize();
         int upperBound = size / GGMLType.Q8_0.getBlockSize() * GGMLType.Q8_0.getBlockSize();
         for (; j < upperBound; j += GGMLType.Q8_0.getBlockSize(), blockOffset += GGMLType.Q8_0.getTypeSize()) {
-            float wScaleValue = Float.float16ToFloat(thiz.memorySegment.get(JAVA_SHORT_LE, blockOffset));
+            float wScaleValue = Float.float16ToFloat(readShort(thiz.memorySegment, blockOffset));
             var wScale = FloatVector.broadcast(F_SPECIES, wScaleValue);
             if (F_SPECIES.vectorBitSize() == 256) {
                 var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_256, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
