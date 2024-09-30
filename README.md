@@ -98,36 +98,29 @@ Run the resulting `llama3.jar` as follows:
 java --enable-preview --add-modules jdk.incubator.vector -jar llama3.jar --help
 ```
 
-### GraalVM
+### GraalVM Native Image
 
-Build a jar:
-```bash
-javac -g --enable-preview --source 24 --add-modules jdk.incubator.vector -d target/classes Llama3.java
-jar -cvfe ./target/llama3.jar com.llama4j.Llama3 LICENSE -C target/classes .
-```
-
-Run on JIT: 
+Compile to native via `make` (recommended):
 
 ```bash
-java --enable-preview --add-modules jdk.incubator.vector -jar ./target/llama3.jar --model Meta-Llama-3.1-8B-Instruct-Q4_0.gguf --chat
+make native
 ```
-Compile to Native Image:
+Or directly:
 
 ```bash
-native-image --enable-preview --add-modules jdk.incubator.vector -H:+ForeignAPISupport -jar ./target/llama3.jar -o ./target/llama3
+native-image -H:+UnlockExperimentalVMOptions	-H:+VectorAPISupport -H:+ForeignAPISupport -O3 -march=native --enable-preview --add-modules jdk.incubator.vector --initialize-at-build-time=com.llama4j.FloatTensor -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 -jar llama3.jar -o llama3
 ```
-<!-- To be added: `-H:+VectorAPISupport` -->
 
 Run as Native Image:
 
 ```bash
-./llama3 --model Meta-Llama-3.1-8B-Instruct-Q4_0.gguf --chat
+./llama3 --model Llama-3.2-1B-Instruct-Q8_0 --chat
 ```
 
 
 ## Performance
 
-GraalVM now supports more [Vector API](https://openjdk.org/jeps/338) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from graalvm.org or sdkman: `sdk install java 24.ea.12-graal`.
+GraalVM now supports more [Vector API](https://openjdk.org/jeps/469) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from [`oracle-graalvm-ea-builds`](https://github.com/graalvm/oracle-graalvm-ea-builds) or sdkman: `sdk install java 24.ea.12-graal`.
 
 ### llama.cpp
 
