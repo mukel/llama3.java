@@ -98,11 +98,29 @@ Run the resulting `llama3.jar` as follows:
 java --enable-preview --add-modules jdk.incubator.vector -jar llama3.jar --help
 ```
 
+### GraalVM Native Image
+
+Compile to native via `make` (recommended):
+
+```bash
+make native
+```
+Or directly:
+
+```bash
+native-image -H:+UnlockExperimentalVMOptions	-H:+VectorAPISupport -H:+ForeignAPISupport -O3 -march=native --enable-preview --add-modules jdk.incubator.vector --initialize-at-build-time=com.llama4j.FloatTensor -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 -jar llama3.jar -o llama3
+```
+
+Run as Native Image:
+
+```bash
+./llama3 --model Llama-3.2-1B-Instruct-Q8_0 --chat
+```
+
+
 ## Performance
 
-**Important Note**  
-On GraalVM, please note that the Graal compiler doesn't support the Vector API yet, run with `-Dllama.VectorAPI=false`, but expect sub-optimal performance.   
-Vanilla OpenJDK 21+ is recommended for now, which supports the Vector API.
+GraalVM now supports more [Vector API](https://openjdk.org/jeps/469) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from [`oracle-graalvm-ea-builds`](https://github.com/graalvm/oracle-graalvm-ea-builds) or sdkman: `sdk install java 24.ea.15-graal`.
 
 ### llama.cpp
 
