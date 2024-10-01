@@ -3,7 +3,7 @@
 Practical [Llama 3](https://github.com/meta-llama/llama3), [3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1) and [3.2](https://ai.meta.com/blog/llama-3-2-connect-2024-vision-edge-mobile-devices/) inference implemented in a single Java file.
 
 <p align="center">
-  <img width="700" src="https://github.com/mukel/llama3.java/assets/1896283/7939588c-c0ff-4261-b67f-8a54bad59ab5">
+  <img width="700" src="https://github.com/user-attachments/assets/69bbf681-ae84-4a46-bcd6-746dbd421a6e">
 </p>
 
 This project is the successor of [llama2.java](https://github.com/mukel/llama2.java)
@@ -25,7 +25,7 @@ Besides the educational value, this project will be used to test and tune compil
 Here's the interactive `--chat` mode in action: 
 
 <p align="center">
-  <img width="700" src="https://github.com/mukel/llama3.java/assets/1896283/2245f59d-6c86-49c3-87d3-8b1a2cb83a91">
+  <img width="700" src="https://github.com/user-attachments/assets/f609bb73-7f11-4ea0-9ec7-43fbd3c96d3b">
 </p>
 
 ## Setup
