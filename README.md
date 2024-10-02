@@ -122,58 +122,40 @@ Run as Native Image:
 
 GraalVM now supports more [Vector API](https://openjdk.org/jeps/469) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from [`oracle-graalvm-ea-builds`](https://github.com/graalvm/oracle-graalvm-ea-builds) or sdkman: `sdk install java 24.ea.15-graal`.
 
-### llama.cpp
+#### llama.cpp
 
-Vanilla `llama.cpp` built with `make -j 20`.
+Vanilla `llama.cpp` built with `make`.
 ```bash
-./main --version
-version: 2879 (4f026363)
-built with cc (GCC) 13.2.1 20230801 for x86_64-pc-linux-gnu
+./llama-cli --version                                                                                                                                                                          130 ↵
+version: 3862 (3f1ae2e3)
+built with cc (GCC) 14.2.1 20240805 for x86_64-pc-linux-gnu
 ```
 
 Executed as follows:
 ```bash
-./main -m ../Meta-Llama-3-8B-Instruct-Q4_0.gguf \
-  -n 512 \
-  -s 42 \
-  -p "<|start_of_header_id|>user<|end_of_header_id|>Why is the sky blue?<|eot_id|><|start_of_header_id|>assistant<|end_of_header_id|>\n\n" \
-  --interactive-specials
+./llama-bench -m Llama-3.2-1B-Instruct-Q4_0.gguf -p 0 -n 128
 ```
-Collected the **"eval time"** metric in tokens\s.
 
-### Llama3.java
-Running on OpenJDK 21.0.2.
+#### Llama3.java
 
 ```bash
-jbang Llama3.java \
-  --model ./Meta-Llama-3-8B-Instruct-Q4_0.gguf \
-  --max-tokens 512 \
+taskset -c 0-15 ./llama3 \
+  --model ./Llama-3-1B-Instruct-Q4_0.gguf \
+  --max-tokens 128 \
   --seed 42 \
   --stream false \
   --prompt "Why is the sky blue?"
 ```
 
-### Results
-
-#### Notebook Intel 13900H 6pC+8eC/20T 64GB (5200) Linux 6.6.26 
-| Model                            | tokens/s | Implementation   |  
-|----------------------------------|----------|------------------|
-| Llama-3-8B-Instruct-Q4_0.gguf    | 7.53     | llama.cpp        |
-| Llama-3-8B-Instruct-Q4_0.gguf    | 6.95     | llama3.java      |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 5.16     | llama.cpp        |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 4.02     | llama3.java      |
-
-#### Workstation AMD 3950X 16C/32T 64GB (3200) Linux 6.6.25
+Hardware specs: 2019 AMD Ryzen 3950X 16C/32T 64GB (3800) Linux 6.6.47.
 
 ****Notes**  
-*Running on a single CCD e.g. `taskset -c 0-15 jbang Llama3.java ...` since inference is constrained by memory bandwidth.* 
+*Running on a single CCD e.g. `taskset -c 0-15 ./llama3 ...` since inference is constrained by memory bandwidth.* 
 
-| Model                            | tokens/s | Implementation   |  
-|----------------------------------|----------|------------------|
-| Llama-3-8B-Instruct-Q4_0.gguf    | 9.26     | llama.cpp        |
-| Llama-3-8B-Instruct-Q4_0.gguf    | 8.03     | llama3.java      |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 5.79     | llama.cpp        |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 4.92     | llama3.java      |
+### Results
+<p align="center">
+  <img width="800" src="https://github.com/user-attachments/assets/c7b2ffe9-6699-42b9-9894-56567e867f4d">
+</p>
 
 ## License
 
