@@ -69,8 +69,9 @@ $(NATIVE_FILE): jar
 		-march=native \
 		--enable-preview \
 		--add-modules jdk.incubator.vector \
-		--initialize-at-build-time=com.llama4j.FloatTensor \
+		--initialize-at-build-time='com.llama4j.AOT,com.llama4j.FloatTensor,com.llama4j.' \
 		-Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 \
+		-Dllama.PreloadGGUF=$(PRELOAD_GGUF) \
 		-jar $(JAR_FILE) \
 		-o $(NATIVE_FILE)
 

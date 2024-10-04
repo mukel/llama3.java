@@ -117,6 +117,17 @@ Run as Native Image:
 ./llama3 --model Llama-3.2-1B-Instruct-Q8_0 --chat
 ```
 
+### AOT model preloading
+
+`Llama3.java` supports AOT model preloading, enabling **0-overhead, instant inference, with minimal TTFT (time-to-first-token)**.
+
+To AOT pre-load a GGUF model:
+```bash
+PRELOAD_GGUF=/path/to/model.gguf make native
+```
+
+A specialized, larger binary will be generated, with no parsing overhead for that particular model.
+It can still run other models, although incurring the usual parsing overhead.
 
 ## Performance
 
