@@ -154,7 +154,7 @@ Hardware specs: 2019 AMD Ryzen 3950X 16C/32T 64GB (3800) Linux 6.6.47.
 
 ### Results
 <p align="center">
-  <img width="800" src="https://github.com/user-attachments/assets/c7b2ffe9-6699-42b9-9894-56567e867f4d">
+  <img width="800" src="chart.svg">
 </p>
 
 ## License

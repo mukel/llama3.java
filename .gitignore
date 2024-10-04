@@ -1,2 +1,4 @@
 target/
 *.gguf
+llama3
+llama3.jar
