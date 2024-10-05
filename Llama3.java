@@ -23,7 +23,13 @@ import jdk.incubator.vector.FloatVector;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -80,9 +86,11 @@ public class Llama3 {
         Llama.State state = null;
         List<Integer> conversationTokens = new ArrayList<>();
         ChatFormat chatFormat = new ChatFormat(model.tokenizer());
+        int stateCacheSize = 0;
         conversationTokens.add(chatFormat.beginOfText);
         if (options.systemPrompt() != null) {
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
+            stateCacheSize = conversationTokens.size();
         }
         int startPosition = 0;
         Scanner in = new Scanner(System.in);
@@ -97,9 +105,29 @@ public class Llama3 {
                 state = model.createNewState();
             }
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, userText)));
+            if (stateCacheSize == 0) {
+                stateCacheSize = conversationTokens.size();
+            }
             conversationTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
+            if (startPosition == 0 && options.readStateCache() && options.stateCachePath() != null) {
+                try (FileInputStream fis = new FileInputStream(options.stateCachePath().toFile());
+                        BufferedInputStream bis = new BufferedInputStream(fis)) {
+                    bis.mark(20);
+                    final int cachedTokens = state.getDeserializedTokensSize(bis);
+                    System.out.println(String.format("Read %d cached tokens in %s", cachedTokens, options.stateCachePath()));
+                    bis.reset();
+                    final List<Integer> tokens = conversationTokens.stream().limit(cachedTokens).toList();
+                    state.deserialize(bis, model.configuration(), model.tokenizer(), tokens);
+                    startPosition = cachedTokens;
+                } catch (IOException e) {
+                    throw new RuntimeException("IO-exception while reading state-cache " + options.stateCachePath(), e);
+                }
+                
+            }
+            Path pathStateCache = (startPosition == 0 && options.writeStateCache() && options.stateCachePath() != null) ? options.stateCachePath() : null;
             Set<Integer> stopTokens = chatFormat.getStopTokens();
-            List<Integer> responseTokens = Llama.generateTokens(model, state, startPosition, conversationTokens.subList(startPosition, conversationTokens.size()), stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
+            List<Integer> responseTokens = Llama.generateTokens(model, state, startPosition, conversationTokens.subList(startPosition, conversationTokens.size()), pathStateCache, stateCacheSize,
+                    stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
                 if (options.stream()) {
                     if (!model.tokenizer().isSpecialToken(token)) {
                         System.out.print(model.tokenizer().decode(List.of(token)));
@@ -129,16 +157,39 @@ public class Llama3 {
         Llama.State state = model.createNewState();
         ChatFormat chatFormat = new ChatFormat(model.tokenizer());
 
+        int stateCacheSize = 0;
         List<Integer> promptTokens = new ArrayList<>();
         promptTokens.add(chatFormat.beginOfText);
         if (options.systemPrompt() != null) {
             promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, options.systemPrompt())));
+            stateCacheSize = promptTokens.size();
         }
         promptTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, options.prompt())));
+        if (stateCacheSize == 0) {
+            stateCacheSize = promptTokens.size();
+        }
         promptTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
+        int startPosition = 0;
+        if (options.readStateCache() && options.stateCachePath() != null) {
+            try (FileInputStream fis = new FileInputStream(options.stateCachePath().toFile());
+                    BufferedInputStream bis = new BufferedInputStream(fis)) {
+                bis.mark(20);
+                final int cachedTokens = state.getDeserializedTokensSize(bis);
+                System.out.println(String.format("Read %d cached tokens in %s", cachedTokens, options.stateCachePath()));
+                bis.reset();
+                final List<Integer> tokens = promptTokens.stream().limit(cachedTokens).toList();
+                state.deserialize(bis, model.configuration(), model.tokenizer(), tokens);
+                startPosition = cachedTokens;
+            } catch (IOException e) {
+                throw new RuntimeException("IO-exception while reading state-cache " + options.stateCachePath(), e);
+            }
+            
+        }
+        Path pathStateCache = (startPosition == 0 && options.writeStateCache() && options.stateCachePath() != null) ? options.stateCachePath() : null;
 
         Set<Integer> stopTokens = chatFormat.getStopTokens();
-        List<Integer> responseTokens = Llama.generateTokens(model, state, 0, promptTokens, stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
+        List<Integer> responseTokens = Llama.generateTokens(model, state, startPosition, promptTokens, pathStateCache, stateCacheSize,
+                stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
             if (options.stream()) {
                 if (!model.tokenizer().isSpecialToken(token)) {
                     System.out.print(model.tokenizer().decode(List.of(token)));
@@ -155,7 +206,8 @@ public class Llama3 {
     }
 
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
-                   float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo) {
+            float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo,
+            Path stateCachePath, boolean readStateCache, boolean writeStateCache) {
 
         Options {
             require(modelPath != null, "Missing argument: --model <path> is required");
@@ -188,6 +240,9 @@ public class Llama3 {
             out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default 512");
             out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
             out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
+            out.println("  --state-cache <path>          optional, path to state-cache file (.ggst)");
+            out.println("  --read-state-cache <boolean>  read state-cache file");
+            out.println("  --write-state-cache <boolean> write state-cache file");
             out.println();
             out.println("Examples:");
             out.println("  jbang Llama3.java --model llama3-8b-q4_0.gguf --prompt \"Tell me a joke\"");
@@ -209,6 +264,9 @@ public class Llama3 {
             boolean interactive = false;
             boolean stream = true;
             boolean echo = false;
+            Path stateCachePath = null;
+            boolean readStateCache = false;
+            boolean writeStateCache = false;
 
             for (int i = 0; i < args.length; i++) {
                 String optionName = args[i];
@@ -241,12 +299,16 @@ public class Llama3 {
                             case "--max-tokens", "-n" -> maxTokens = Integer.parseInt(nextArg);
                             case "--stream" -> stream = Boolean.parseBoolean(nextArg);
                             case "--echo" -> echo = Boolean.parseBoolean(nextArg);
+                            case "--state-cache" -> stateCachePath = Paths.get(nextArg);
+                            case "--read-state-cache" -> readStateCache = Boolean.parseBoolean(nextArg);
+                            case "--write-state-cache" -> writeStateCache = Boolean.parseBoolean(nextArg);
                             default -> require(false, "Unknown option: %s", optionName);
                         }
                     }
                 }
             }
-            return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, stream, echo);
+            return new Options(modelPath, prompt, systemPrompt, interactive, temperature, topp, seed, maxTokens, stream, echo,
+                    stateCachePath, readStateCache, writeStateCache);
         }
     }
 
@@ -854,6 +916,12 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
     }
 
     public static final class State {
+        /** "GGSC": GGUF state cache */
+        private static final int MAGIC_STATE_CACHE =0x47475343;
+        /** "Version 1 */
+        private static final int MAGIC_STATE_VERSION =0x01;
+        
+        private final int kvDim;
 
         // current wave of activations
         public final FloatTensor x; // activation at current time stamp (dim,)
@@ -883,9 +951,105 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
             this.v = ArrayFloatTensor.allocate(config.dim);
             this.att = ArrayFloatTensor.allocate(config.numberOfHeads, config.contextLength);
             this.logits = ArrayFloatTensor.allocate(config.vocabularySize);
-            int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
+            this.kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
             this.keyCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
             this.valueCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
+        }
+        
+        public void serialize(OutputStream os, Configuration config, List<Integer> tokens) throws IOException {
+            ByteBuffer bb = ByteBuffer.allocate(Math.max(Math.max(20, tokens.size() * 4), 4 * kvDim));
+            bb.putInt(0, MAGIC_STATE_CACHE);
+            bb.putInt(4, MAGIC_STATE_VERSION);
+            bb.putInt(8, tokens.size());
+            bb.putInt(12, kvDim);
+            bb.putInt(16, config.numberOfLayers);
+            os.write(bb.array(), 0, 20);
+            for (int i = 0; i < tokens.size(); i++) {
+                bb.putInt(4 * i, tokens.get(i).intValue());
+            }
+            os.write(bb.array(), 0, 4 * tokens.size());
+            for (int nLayer = 0; nLayer < config.numberOfLayers; nLayer++) {
+                for (int i = 0; i < tokens.size(); i++) {
+                    for (int k = 0; k < kvDim; k++) {
+                        bb.putFloat(4 * k, keyCache[nLayer].getFloat(k + i * kvDim));
+                    }
+                    os.write(bb.array(), 0, 4 * kvDim);
+                    for (int k = 0; k < kvDim; k++) {
+                        bb.putFloat(4 * k, valueCache[nLayer].getFloat(k + i * kvDim));
+                    }
+                    os.write(bb.array(), 0, 4 * kvDim);
+                }
+            }
+        }
+        
+        public void deserialize(InputStream is, Configuration config, Tokenizer tokenizer, List<Integer> tokens) throws IOException {
+            ByteBuffer bb = ByteBuffer.allocate(Math.max(Math.max(20, tokens.size() * 4), 4 * kvDim));
+            read(is, bb, 20);
+            check(bb, 0, MAGIC_STATE_CACHE, "MAGIC_STATE_CACHE");
+            check(bb, 4, MAGIC_STATE_VERSION, "MAGIC_STATE_VERSION");
+            check(bb, 8, tokens.size(), "tokens.size");
+            check(bb, 12, kvDim, "kvDim");
+            check(bb, 16, config.numberOfLayers, "numberOfLayers");
+            read(is, bb, 4 * tokens.size());
+            for (int i = 0; i < tokens.size(); i++) {
+                check(bb, 4 * i, tokens.get(i).intValue(), "Token " + i, tokenizer);
+            }
+            for (int nLayer = 0; nLayer < config.numberOfLayers; nLayer++) {
+                for (int i = 0; i < tokens.size(); i++) {
+                    read(is, bb, 4 * kvDim);
+                    for (int k = 0; k < kvDim; k++) {
+                        keyCache[nLayer].setFloat(k + i * kvDim, bb.getFloat(4 * k));
+                    }
+                    read(is, bb, 4 * kvDim);
+                    for (int k = 0; k < kvDim; k++) {
+                        valueCache[nLayer].setFloat(k + i * kvDim, bb.getFloat(4 * k));
+                    }
+                }
+            }
+        }
+        
+        /**
+         * Gets the number of tokens in a state cache.
+         * @param is input-stream of state cache file
+         * @return number of tokens
+         * @throws IOException in case of an IO error
+         */
+        public int getDeserializedTokensSize(InputStream is) throws IOException {
+            ByteBuffer bb = ByteBuffer.allocate(12);
+            read(is, bb, 12);
+            check(bb, 0, MAGIC_STATE_CACHE, "MAGIC_STATE_CACHE");
+            check(bb, 4, MAGIC_STATE_VERSION, "MAGIC_STATE_VERSION");
+            return bb.getInt(8);
+        }
+
+        static void check(ByteBuffer bb, int offset, int expected, String name) throws IOException {
+            final int actual = bb.getInt(offset);
+            if (actual != expected) {
+                throw new IOException(String.format("Unexpected value '%s': actual=0x%x, expected=0x%x", name, expected, actual));
+            }
+        }
+
+        static void check(ByteBuffer bb, int offset, int expected, String name, Tokenizer tokenizer) throws IOException {
+            final int actual = bb.getInt(offset);
+            if (actual != expected) {
+                throw new IOException(String.format("Unexpected value '%s': actual=0x%x ('%s'), expected=0x%x ('%s')",
+                        name, expected, tokenizer.decode(Collections.singletonList(expected)), actual, tokenizer.decode(Collections.singletonList(actual))));
+            }
+        }
+
+        static void read(InputStream is, ByteBuffer bb, int size) throws IOException {
+            byte[] buf = bb.array();
+            int offset = 0;
+            while (offset < size) {
+                int len = is.read(buf, offset, size - offset);
+                if (len == -1) {
+                    break;
+                }
+                offset += len;
+            }
+            if (offset < size) {
+                throw new IOException(String.format("Unexpected end of stream: offset=%d, size=%d", offset, size));
+            }
         }
     }
 
@@ -1035,6 +1199,8 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
      * @param state            state of the model e.g. key/value caches ... this is mutated by this call
      * @param startPosition    start prompt ingestion + inference at this position in the context e.g. useful if state was kept across calls (chained generation). 0 implies run with no previous context.
      * @param promptTokens     prompt tokens to ingest, all the prompt tokens will be ingested, given there's enough capacity left in the context
+     * @param stateCachePath   optioal path of a state-cache file to be written
+     * @param stateCacheSize   size of stat-cache (number of tokens to be cached) in case of a state-cache to be written
      * @param stopTokens       set of tokens that abort generation during inference, stop tokens do not affect prompt ingestion
      * @param maxTokens        maximum number of tokens (can go up to {@link Configuration#contextLength context length}
      *                         if this value is negative or greater than {@link Configuration#contextLength context length}
@@ -1043,7 +1209,8 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
      * @param onTokenGenerated callback, if non-null, it's called every time a token is inferred e.g. it's not called when ingesting prompt tokens
      * @return list of generated/inferred tokens, including the stop token, if any e.g. does not include any token from the prompt
      */
-    public static List<Integer> generateTokens(Llama model, Llama.State state, int startPosition, List<Integer> promptTokens, Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,
+    public static List<Integer> generateTokens(Llama model, Llama.State state, int startPosition, List<Integer> promptTokens, Path stateCachePath, int stateCacheSize,
+            Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,
                                                IntConsumer onTokenGenerated) {
         long startNanos = System.nanoTime();
         if (maxTokens < 0 || model.configuration().contextLength < maxTokens) {
@@ -1055,6 +1222,16 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         int promptIndex = 0;
         for (int position = startPosition; position < maxTokens; ++position) {
             forward(model, state, token, position);
+            if (promptIndex == stateCacheSize && stateCachePath != null) {
+                System.out.println(String.format("Write %d of %d tokens into %s", stateCacheSize, promptTokens.size(), stateCachePath));
+                final List<Integer> tokenToCache = promptTokens.subList(0, stateCacheSize);
+                try (FileOutputStream fos = new FileOutputStream(stateCachePath.toFile());
+                        BufferedOutputStream bos = new BufferedOutputStream(fos)) {
+                    state.serialize(bos, model.configuration, tokenToCache);
+                } catch (IOException e) {
+                    throw new RuntimeException(String.format("IO-error while writing %s", stateCachePath), e);
+                }
+            }
             if (promptIndex < promptTokens.size()) {
                 // Force-pick token from prompt.
                 nextToken = promptTokens.get(promptIndex++);
