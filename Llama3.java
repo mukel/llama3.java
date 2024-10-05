@@ -13,6 +13,11 @@
 // Multi-threaded matrix vector multiplication routines implemented using Java's Vector API
 // Simple CLI with --chat and --instruct mode
 //
+// Set system-properties llm.server.host, llm.server.port and llm.server.path to start
+// a HTTP-server which serves llama.cpp-requests (POST-request /completion).
+// llama.server.path should point to a folder which contains HTML-ressources like those in
+// https://github.com/ggerganov/llama.cpp/tree/master/examples/server/public.
+//
 // To run just:
 // jbang Llama3.java --help
 //
@@ -22,12 +27,22 @@ package com.llama4j;
 import jdk.incubator.vector.*;
 import sun.misc.Unsafe;
 
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
+
+import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.PrintStream;
+import java.io.Reader;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.reflect.Field;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -38,7 +53,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
 import java.util.function.IntFunction;
 import java.util.function.LongConsumer;
@@ -168,6 +185,431 @@ public class Llama3 {
         }
     }
 
+    /**
+     * Starts a HTTP-server to server requests in Llama.cpp-style.
+     * @param model model
+     * @param sampler sampler
+     * @param options options
+     * @param host host-name or ip-address to bind the http-server
+     * @param port port of http-server
+     */
+    static void runHttpServer(Llama model, Sampler sampler, Options options, String host, int port) {
+        InetSocketAddress addr = new InetSocketAddress(host, port);
+        int backlog = 0;
+        String rootpath = "/";
+        System.out.println(String.format("Start server at %s", addr));
+        final Llama.State state = model.createNewState();
+        final List<Integer> conversationTokens = new ArrayList<>();
+
+        AtomicReference<HttpServer> refServer = new AtomicReference<>();
+        HttpHandler handler = exchange -> {
+            System.out.format("httpserver: request of %s by %s%n", exchange.getRequestURI(), exchange.getRemoteAddress());
+            if ("GET".equals(exchange.getRequestMethod())) {
+                String pathBase = System.getProperty("llm.server.path", "public");
+                String pathReq = exchange.getRequestURI().getPath();
+                if ("/".equals(pathReq)) {
+                    pathReq = "index.html";
+                }
+                if (!Pattern.matches("/?[A-Za-z0-9_.-]*", pathReq)) {
+                    System.err.format("Invalid path: %s%n", pathReq);
+                    byte[] buf = "Invalid path".getBytes(StandardCharsets.UTF_8);
+                    exchange.setAttribute("Content-Type", "application/html");
+                    exchange.sendResponseHeaders(404, buf.length);
+                    exchange.getResponseBody().write(buf);
+                    exchange.close();
+                    return;
+                }
+                final File file = new File(pathBase, pathReq);
+                if (!file.isFile()) {
+                    System.err.println("No such file: " + file);
+                    byte[] buf = "File not found".getBytes(StandardCharsets.UTF_8);
+                    exchange.setAttribute("Content-Type", "application/html");
+                    exchange.sendResponseHeaders(404, buf.length);
+                    exchange.getResponseBody().write(buf);
+                    exchange.close();
+                    return;
+                }
+                exchange.getRequestBody().close();
+                String contentType = switch (pathReq.replaceFirst(".*[.]", "")) {
+                    case "html" -> "text/html";
+                    case "css" -> "text/css";
+                    case "js", "mjs" -> "text/javascript";
+                    case "ico" -> "image";
+                    default -> "application/octet-stream";
+                };
+                exchange.getResponseHeaders().set("Content-type", contentType);
+                byte[] buf = Files.readAllBytes(file.toPath());
+                exchange.sendResponseHeaders(200, buf.length);
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(buf);
+                }
+                exchange.close();
+                return;
+            }
+            String prompt;
+            Map<String, String> mapRequest;
+            try (InputStream is = exchange.getRequestBody();
+                    InputStreamReader isr = new InputStreamReader(is);
+                    BufferedReader br = new BufferedReader(isr);
+                    TeeBufferedReader tbr = new TeeBufferedReader(br)) {
+                try {
+                    readChar(tbr, true, '{');
+                    mapRequest = parseJsonDict(tbr);
+    
+                    prompt = mapRequest.get("prompt");
+                    if (prompt == null) {
+                        System.out.println("Map: " + mapRequest);
+                        throw new IllegalArgumentException("Prompt is missing in request");
+                    }
+                    if ("STOP".equalsIgnoreCase(prompt)) {
+                        refServer.get().stop(0);
+                        throw new IllegalArgumentException("Server is stopping");
+                    }
+                }
+                catch (IllegalArgumentException e) {
+                    System.out.println("JSON-Prefix: " + tbr.sb);
+                    e.printStackTrace();
+                    Map<String, Object> mapError = new HashMap<>();
+                    mapError.put("errormsg", "Invalid request: " + e.getMessage());
+                    mapError.put("jsonProcessed", tbr.sb.toString());
+                    var sb = new StringBuilder();
+                    dumpJson(sb, mapError);
+                    byte[] bufError = sb.toString().getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(400, bufError.length);
+                    exchange.setAttribute("Content-Type", "application/json");
+                    exchange.getResponseBody().write(bufError);
+                    exchange.close();
+                    return;
+                }
+            }
+            catch (IOException e) {
+                e.printStackTrace();
+                exchange.sendResponseHeaders(500, 0);
+                exchange.close();
+                return;
+            }
+            
+            ChatFormat chatFormat = new ChatFormat(model.tokenizer());
+            String systemPrompt = mapRequest.get("systemPrompt");
+            if (systemPrompt == null) {
+                systemPrompt = options.systemPrompt();
+            }
+            if (systemPrompt != null) {
+                conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.SYSTEM, systemPrompt)));
+            }
+            int startPosition = 0;
+            System.out.print("> ");
+            System.out.flush();
+            String userText = prompt;
+            conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, userText)));
+            conversationTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
+            Set<Integer> stopTokens = chatFormat.getStopTokens();
+            StringBuilder sbStream = new StringBuilder();
+            List<Integer> responseTokens = Llama.generateTokens(model, state, startPosition, conversationTokens.subList(startPosition, conversationTokens.size()), stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
+                if (options.stream()) {
+                    if (!model.tokenizer().isSpecialToken(token)) {
+                        String sToken = model.tokenizer().decode(List.of(token));
+                        System.out.print(sToken);
+                        sbStream.append(sToken);
+                    }
+                }
+            });
+            // Include stop token in the prompt history, but not in the response displayed to the user.
+            conversationTokens.addAll(responseTokens);
+            startPosition = conversationTokens.size();
+            Integer stopToken = null;
+            if (!responseTokens.isEmpty() && stopTokens.contains(responseTokens.getLast())) {
+                stopToken = responseTokens.getLast();
+                responseTokens.removeLast();
+            }
+            Map<String, Object> mapResponse = new LinkedHashMap<>();
+            if (!options.stream()) {
+                String responseText = model.tokenizer().decode(responseTokens);
+                System.out.println(responseText);
+                mapResponse.put("content", responseText);
+            } else {
+                mapResponse.put("content", sbStream.toString());
+            }
+            mapResponse.put("stop", Boolean.TRUE);
+            if (stopToken == null) {
+                System.err.println("Ran out of context length...");
+            }
+            var sbOut = new StringBuilder();
+            dumpJson(sbOut, mapResponse);
+            byte[] buf = String.format("data: %s\n", sbOut).getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, buf.length);
+            exchange.getResponseBody().write(buf);
+            exchange.close();
+        };
+        try {
+            final HttpServer server = HttpServer.create(addr, backlog, rootpath, handler);
+            refServer.set(server);
+            server.start();
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.err.println("Couldn't start LLM-server");
+        }
+    }
+
+    private static void dumpJson(StringBuilder sb, Map<String, Object> mapError) {
+        sb.append('{');
+        String as = "";
+        for (Entry<String, Object> entry : mapError.entrySet()) {
+            sb.append(as);
+            dumpString(sb, entry.getKey());
+            sb.append(':');
+            var value = entry.getValue();
+            if (value instanceof String s) {
+                dumpString(sb, s);
+            }
+            else if (value instanceof Boolean b) {
+                sb.append(b);
+            }
+            else {
+                throw new IllegalArgumentException("Unexpected value of type " + value.getClass());
+            }
+            as = ",";
+        }
+        sb.append('}');
+    }
+
+    private static void dumpString(StringBuilder sb, String s) {
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            final char c = s.charAt(i);
+            if ((c >= ' ' && c < 0x7f) || (c >= 0xa1 && c <= 0xff)) {
+                sb.append(c);
+            } else if (c == '\n') {
+                sb.append("\\n");
+            } else if (c == '\r') {
+                sb.append("\\r");
+            } else if (c == '\t') {
+                sb.append("\\t");
+            } else {
+                sb.append("\\u");
+                final String sHex = Integer.toHexString(c);
+                for (int j = sHex.length(); j < 4; j++) {
+                    sb.append('0');
+                }
+                sb.append(sHex);
+            }
+        }
+        sb.append('"');
+    }
+    
+    static class TeeBufferedReader extends BufferedReader {
+        final StringBuilder sb = new StringBuilder();
+        /**
+         * Constructor
+         * @param in stream to be copied and read
+         */
+        public TeeBufferedReader(Reader in) {
+            super(in);
+        }
+
+        public int read() throws IOException {
+            int c = super.read();
+            if (c >= 0) {
+                sb.append((char) c);
+            }
+            return c;
+        }
+    }
+
+    private static List<String> parseJsonArray(BufferedReader br) throws IOException {
+        // The '[' has been read already.
+        List<String> list = new ArrayList<>();
+        boolean needComma = false;
+        while (true) {
+            char c = readChar(br, true);
+            if (c == ']') {
+                break;
+            }
+            if (needComma) {
+                if (c != ',') {
+                    throw new IllegalArgumentException("Missing comma: " + c);
+                }
+                c = readChar(br, true);
+            }
+            c = readChar(br, true);
+            String value;
+            if (c == '"') {
+                value = readString(br);
+            }
+            else if (c == '{') {
+                // Poor support of inner dictionaries.
+                Map<String, String> mapInner = parseJsonDict(br);
+                value = mapInner.toString();
+            }
+            else if (c == '[') {
+                // Poor support of inner arrays.
+                List<String> listInner = parseJsonArray(br);
+                value = listInner.toString();
+            }
+            else {
+                var sb = new StringBuilder();
+                while (true) {
+                    if (c == '}' || c == ',') {
+                        break;
+                    }
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.') {
+                        sb.append(c);
+                        c = readChar(br, false);
+                    } else {
+                        throw new IllegalArgumentException("Illegal value character: " + c);
+                    }
+                }
+                if (sb.length() == 0) {
+                    throw new IllegalArgumentException("Missing value");
+                }
+                value = sb.toString();
+            }
+            list.add(value);
+            needComma = (c != ',');
+        }
+        return list;
+    }
+
+    /**
+     * This is a simple (not complete, but without dependency) JSON-parser used to parse llama.cpp-responses.
+     * Use a parser of https://json.org/ to get a complete implementation.
+     * @param br reader containing a JSON document
+     * @return map from key to value
+     * @throws IOException in case of an IO error
+     */
+    private static Map<String, String> parseJsonDict(BufferedReader br) throws IOException {
+        // The '{' has been read already.
+        Map<String, String> map = new LinkedHashMap<>();
+        boolean needComma = false;
+        while (true) {
+            char c = readChar(br, true);
+            if (c == '}') {
+                break;
+            }
+            if (needComma) {
+                if (c != ',') {
+                    throw new IllegalArgumentException("Missing comma: " + c);
+                }
+                c = readChar(br, true);
+            }
+            if (c != '"') {
+                throw new IllegalArgumentException("Illegal key: " + c);
+            }
+            String key = readString(br);
+            c = readChar(br, true);
+            if (c != ':') {
+                throw new IllegalArgumentException("Illegal character after key: " + c);
+            }
+            c = readChar(br, true);
+            String value;
+            if (c == '"') {
+                value = readString(br);
+            }
+            else if (c == '{') {
+                // Poor support of inner dictionaries.
+                Map<String, String> mapInner = parseJsonDict(br);
+                value = mapInner.toString();
+            }
+            else if (c == '[') {
+                // Poor support of inner arrays.
+                List<String> listInner = parseJsonArray(br);
+                value = listInner.toString();
+            }
+            else {
+                var sb = new StringBuilder();
+                while (true) {
+                    if (c == '}' || c == ',') {
+                        break;
+                    }
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-') {
+                        sb.append(c);
+                        c = readChar(br, false);
+                    } else {
+                        throw new IllegalArgumentException("Illegal value character: " + c);
+                    }
+                }
+                if (sb.length() == 0) {
+                    throw new IllegalArgumentException("Missing value of key " + key);
+                }
+                value = sb.toString();
+            }
+            map.put(key, value);
+            needComma = (c != ',');
+        }
+        return map;
+    }
+
+    private static String readString(BufferedReader br) throws IOException {
+        var sb = new StringBuilder();
+        while (true) {
+            char c = readChar(br, true);
+            if (c == '"') {
+                break;
+            }
+            if (c == '\\') {
+                c = readChar(br, false);
+                if (c == '"') {
+                    ;
+                }
+                else if (c == 't') {
+                    c = '\t';
+                }
+                else if (c == 'n') {
+                    c = '\n';
+                }
+                else if (c == 'u') {
+                    char[] cBuf = new char[4];
+                    for (int i = 0; i < 4; i++) {
+                        cBuf[i] = readChar(br, false);
+                    }
+                    try {
+                        c = (char) Integer.parseInt(new String(cBuf), 16);
+                    } catch (NumberFormatException e) {
+                        throw new IllegalArgumentException("Unexpected unicode-escape: " + new String(cBuf));
+                    }
+                }
+                else {
+                    throw new IllegalArgumentException("Unexpected escape character: " + c);
+                }
+                sb.append(c);
+                continue;
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    private static char readChar(BufferedReader br, boolean ignoreWS) throws IOException {
+        while (true) {
+            int c = br.read();
+            if (c == -1) {
+                throw new IllegalArgumentException(String.format("Unexpected end of stream, expected '%c'", c));
+            }
+            if (ignoreWS && (c == ' ' || c == '\t' || c == '\r' || c == '\n')) {
+                continue;
+            }
+            return (char) c;
+        }
+    }
+
+    private static void readChar(BufferedReader br, boolean ignoreWS, char expected) throws IOException {
+        while (true) {
+            int c = br.read();
+            if (c == -1) {
+                throw new IllegalArgumentException(String.format("Unexpected end of stream, expected '%c'", c));
+            }
+            if (ignoreWS && (c == ' ' || c == '\t' || c == '\r' || c == '\n')) {
+                continue;
+            }
+            if (c == expected) {
+                break;
+            }
+            throw new IllegalArgumentException(String.format("Unexpected character '%c' (0x%04x) instead of '%c'",
+                        c, c, expected));
+        }
+    }
+
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
                    float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo) {
 
@@ -274,7 +716,11 @@ public class Llama3 {
             model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
         }
         Sampler sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
-        if (options.interactive()) {
+        String host = System.getProperty("llm.server.host");
+        int port = Integer.parseInt(System.getProperty("llm.server.port", "8089"));
+        if (host != null) {
+            runHttpServer(model, sampler, options, host, port);
+        } else  if (options.interactive()) {
             runInteractive(model, sampler, options);
         } else {
             runInstructOnce(model, sampler, options);
