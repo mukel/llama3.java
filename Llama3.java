@@ -117,13 +117,8 @@ public class Llama3 {
             if (startPosition == 0 && options.readStateCache() && options.stateCachePath() != null) {
                 try (FileInputStream fis = new FileInputStream(options.stateCachePath().toFile());
                         BufferedInputStream bis = new BufferedInputStream(fis)) {
-                    bis.mark(20);
-                    final int cachedTokens = state.getDeserializedTokensSize(bis);
-                    System.out.println(String.format("Read %d cached tokens in %s", cachedTokens, options.stateCachePath()));
-                    bis.reset();
-                    final List<Integer> tokens = conversationTokens.stream().limit(cachedTokens).toList();
-                    state.deserialize(bis, model.configuration(), model.tokenizer(), tokens);
-                    startPosition = cachedTokens;
+                    System.out.printf("Read cached tokens in %s%n", options.stateCachePath());
+                    startPosition = state.deserialize(bis, model.configuration(), model.tokenizer(), conversationTokens, options.echo());
                 } catch (IOException e) {
                     throw new RuntimeException("IO-exception while reading state-cache " + options.stateCachePath(), e);
                 }
@@ -131,6 +126,9 @@ public class Llama3 {
             }
             Path pathStateCache = (startPosition == 0 && options.writeStateCache() && options.stateCachePath() != null) ? options.stateCachePath() : null;
             Set<Integer> stopTokens = chatFormat.getStopTokens();
+            if (options.echo()) {
+                dumpStatistics(model, startPosition, stopTokens);
+            }
             List<Integer> responseTokens = Llama.generateTokens(model, state, startPosition, conversationTokens.subList(startPosition, conversationTokens.size()), pathStateCache, stateCacheSize,
                     stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
                 if (options.stream()) {
@@ -178,13 +176,8 @@ public class Llama3 {
         if (options.readStateCache() && options.stateCachePath() != null) {
             try (FileInputStream fis = new FileInputStream(options.stateCachePath().toFile());
                     BufferedInputStream bis = new BufferedInputStream(fis)) {
-                bis.mark(20);
-                final int cachedTokens = state.getDeserializedTokensSize(bis);
-                System.out.println(String.format("Read %d cached tokens in %s", cachedTokens, options.stateCachePath()));
-                bis.reset();
-                final List<Integer> tokens = promptTokens.stream().limit(cachedTokens).toList();
-                state.deserialize(bis, model.configuration(), model.tokenizer(), tokens);
-                startPosition = cachedTokens;
+                System.out.printf("Read cached tokens in %s%n", options.stateCachePath());
+                startPosition = state.deserialize(bis, model.configuration(), model.tokenizer(), promptTokens, options.echo());
             } catch (IOException e) {
                 throw new RuntimeException("IO-exception while reading state-cache " + options.stateCachePath(), e);
             }
@@ -193,6 +186,9 @@ public class Llama3 {
         Path pathStateCache = (startPosition == 0 && options.writeStateCache() && options.stateCachePath() != null) ? options.stateCachePath() : null;
 
         Set<Integer> stopTokens = chatFormat.getStopTokens();
+        if (options.echo()) {
+            dumpStatistics(model, startPosition, stopTokens);
+        }
         List<Integer> responseTokens = Llama.generateTokens(model, state, startPosition, promptTokens, pathStateCache, stateCacheSize,
                 stopTokens, options.maxTokens(), sampler, options.echo(), token -> {
             if (options.stream()) {
@@ -208,6 +204,18 @@ public class Llama3 {
             String responseText = model.tokenizer().decode(responseTokens);
             System.out.println(responseText);
         }
+    }
+
+    private static void dumpStatistics(Llama model, int startPosition, Set<Integer> stopTokens) {
+        var config = model.configuration();
+        int numLayers = config.numberOfLayers;
+        int dim = config.dim;
+        int headSize = config.headSize;
+        int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
+        int vocSize = model.configuration().vocabularySize;
+        System.out.printf("model: numLayers=%d, dim=%d, numHeads=%d, headSize=%d, kvDim=%d, vocSize=%d%n",
+                numLayers, dim, config.numberOfHeads, headSize, kvDim, vocSize);
+        System.out.printf("startPosition=%d, stopTokens=%s%n", startPosition, stopTokens);
     }
 
     record Options(Path modelPath, String prompt, String systemPrompt, boolean interactive,
@@ -247,7 +255,7 @@ public class Llama3 {
             out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
             out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
             out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
-            out.println("  --state-cache <path>          optional, path to state-cache file (.ggst)");
+            out.println("  --state-cache <path>          optional, path to state-cache file (.ggsc)");
             out.println("  --read-state-cache <boolean>  read state-cache file");
             out.println("  --write-state-cache <boolean> write state-cache file");
             out.println();
@@ -736,16 +744,18 @@ final class ModelLoader {
     public static Llama loadModel(Path ggufPath, int contextLength, boolean loadWeights) throws IOException {
         GGUF gguf = GGUF.loadModel(ggufPath);
         FileChannel fileChannel = FileChannel.open(ggufPath, StandardOpenOption.READ);
-        return loadModel(fileChannel, gguf, contextLength, loadWeights);
+        return loadModel(ggufPath, fileChannel, gguf, contextLength, loadWeights);
     }
 
-    public static Llama loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights) throws IOException {
+    public static Llama loadModel(Path ggufPath, FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights) throws IOException {
         try (var ignored = Timer.log("Load LlaMa model")) {
             Map<String, Object> metadata = gguf.getMetadata();
             Vocabulary vocabulary = loadVocabulary(metadata);
             Tokenizer tokenizer = createTokenizer(metadata, vocabulary);
 
+            String modelName = ggufPath.getFileName().toString();
             Llama.Configuration config = new Llama.Configuration(
+                    modelName,
                     (int) metadata.get("llama.embedding_length"),
                     (int) metadata.get("llama.feed_forward_length"),
                     (int) metadata.get("llama.block_count"),
@@ -875,6 +885,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
     }
 
     public static final class Configuration {
+        public final String modelGGUFName; // model GGUF-name
         public final int dim; // transformer dimension
         public final int hiddenDim; // for ffn layers
         public final int numberOfLayers; // number of layers
@@ -890,10 +901,11 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
             if (newContextLength < 0) {
                 return this; // no change
             }
-            return new Configuration(this.dim, this.hiddenDim, this.numberOfLayers, this.numberOfHeads, this.numberOfKeyValueHeads, this.vocabularySize, newContextLength, this.rmsNormEps, this.ropeTheta);
+            return new Configuration(this.modelGGUFName, this.dim, this.hiddenDim, this.numberOfLayers, this.numberOfHeads, this.numberOfKeyValueHeads, this.vocabularySize, newContextLength, this.rmsNormEps, this.ropeTheta);
         }
 
-        public Configuration(int dim, int hiddenDim, int numberOfLayers, int numberOfHeads, int numberOfKeyValueHeads, int vocabularySize, int contextLength, float rmsNormEps, float ropeTheta) {
+        public Configuration(String modelGGUFName, int dim, int hiddenDim, int numberOfLayers, int numberOfHeads, int numberOfKeyValueHeads, int vocabularySize, int contextLength, float rmsNormEps, float ropeTheta) {
+            this.modelGGUFName = modelGGUFName;
             this.dim = dim;
             this.hiddenDim = hiddenDim;
             this.numberOfLayers = numberOfLayers;
@@ -951,8 +963,8 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
     public static final class State {
         /** "GGSC": GGUF state cache */
         private static final int MAGIC_STATE_CACHE =0x47475343;
-        /** "Version 1 */
-        private static final int MAGIC_STATE_VERSION =0x01;
+        /** "Version 2 */
+        private static final int MAGIC_STATE_VERSION =0x02;
         
         private final int kvDim;
 
@@ -990,13 +1002,23 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         }
         
         public void serialize(OutputStream os, Configuration config, List<Integer> tokens) throws IOException {
-            ByteBuffer bb = ByteBuffer.allocate(Math.max(Math.max(20, tokens.size() * 4), 4 * kvDim));
+            if (!(keyCache[0] instanceof ArrayFloatTensor)) {
+                throw new UnsupportedOperationException("keyCache has unexpected type: " + keyCache.getClass());
+            }
+            if (!(valueCache[0] instanceof ArrayFloatTensor)) {
+                throw new UnsupportedOperationException("valueCache has unexpected type: " + valueCache.getClass());
+            }
+            byte[] bufName = config.modelGGUFName.getBytes(StandardCharsets.UTF_8);
+            int[] sizes = { 24, bufName.length, tokens.size() * 4, kvDim * 4};
+            ByteBuffer bb = ByteBuffer.allocate(Arrays.stream(sizes).max().getAsInt());
             bb.putInt(0, MAGIC_STATE_CACHE);
             bb.putInt(4, MAGIC_STATE_VERSION);
-            bb.putInt(8, tokens.size());
-            bb.putInt(12, kvDim);
-            bb.putInt(16, config.numberOfLayers);
-            os.write(bb.array(), 0, 20);
+            bb.putInt(8, bufName.length);
+            bb.putInt(12, tokens.size());
+            bb.putInt(16, kvDim);
+            bb.putInt(20, config.numberOfLayers);
+            os.write(bb.array(), 0, 24);
+            os.write(bufName);
             for (int i = 0; i < tokens.size(); i++) {
                 bb.putInt(4 * i, tokens.get(i).intValue());
             }
@@ -1015,46 +1037,67 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
             }
         }
         
-        public void deserialize(InputStream is, Configuration config, Tokenizer tokenizer, List<Integer> tokens) throws IOException {
-            ByteBuffer bb = ByteBuffer.allocate(Math.max(Math.max(20, tokens.size() * 4), 4 * kvDim));
-            read(is, bb, 20);
+        public int deserialize(InputStream is, Configuration config, Tokenizer tokenizer, List<Integer> tokens, boolean echo) throws IOException {
+            ByteBuffer bb = ByteBuffer.allocate(24);
+            read(is, bb, 24);
             check(bb, 0, MAGIC_STATE_CACHE, "MAGIC_STATE_CACHE");
             check(bb, 4, MAGIC_STATE_VERSION, "MAGIC_STATE_VERSION");
-            check(bb, 8, tokens.size(), "tokens.size");
-            check(bb, 12, kvDim, "kvDim");
-            check(bb, 16, config.numberOfLayers, "numberOfLayers");
-            read(is, bb, 4 * tokens.size());
-            for (int i = 0; i < tokens.size(); i++) {
-                check(bb, 4 * i, tokens.get(i).intValue(), "Token " + i, tokenizer);
+            int nameActualLength = bb.getInt(8);
+            int numCachedTokens = bb.getInt(12);
+            check(bb, 16, kvDim, "kvDim");
+            check(bb, 20, config.numberOfLayers, "numberOfLayers");
+
+            int[] sizes = { nameActualLength, numCachedTokens * 4, kvDim * 4 };
+            bb = ByteBuffer.allocate(Arrays.stream(sizes).max().getAsInt());
+
+            String nameExpected = config.modelGGUFName;
+            byte[] bufNameExpected = nameExpected.getBytes(StandardCharsets.UTF_8);
+            read(is, bb, nameActualLength);
+            String nameActual = new String(bb.array(), 0, nameActualLength);
+            if (!nameActual.equals(nameExpected)) {
+                throw new IllegalArgumentException(String.format("Invalid model-name in state-cache: expected='%s', actual='%s'", nameExpected, nameActual));
+            }
+            read(is, bb, 4 * numCachedTokens);
+            int numTokensRead = 0;
+            final List<Integer> cachedTokens = new ArrayList<>();
+            for (int i = 0; i < numCachedTokens && i < tokens.size(); i++) {
+                final int actual = bb.getInt(4 * i);
+                cachedTokens.add(actual);
+                if (i != numTokensRead) {
+                	continue;
+                }
+                int expected = tokens.get(i).intValue();
+                if (actual == expected) {
+                    numTokensRead++;
+                } else if (i < tokens.size() - 2) {
+                    System.out.printf("Reused %d of %d tokens in cache-file, actual=%d ('%s'), expected=%d ('%s')%n",
+                            numTokensRead, tokens.size(),
+                            expected, tokenizer.decode(Collections.singletonList(expected)), actual, tokenizer.decode(Collections.singletonList(actual)));
+                }
+            }
+            if (echo) {
+                System.out.println("Current tokens: " + tokens);
+                System.out.println("Cached tokens:  " + cachedTokens);
             }
             for (int nLayer = 0; nLayer < config.numberOfLayers; nLayer++) {
-                for (int i = 0; i < tokens.size(); i++) {
+                for (int i = 0; i < numCachedTokens; i++) {
                     read(is, bb, 4 * kvDim);
-                    for (int k = 0; k < kvDim; k++) {
-                        keyCache[nLayer].setFloat(k + i * kvDim, bb.getFloat(4 * k));
+                    if (i < numTokensRead) {
+                        for (int k = 0; k < kvDim; k++) {
+                            keyCache[nLayer].setFloat(k + i * kvDim, bb.getFloat(4 * k));
+                        }
                     }
                     read(is, bb, 4 * kvDim);
-                    for (int k = 0; k < kvDim; k++) {
-                        valueCache[nLayer].setFloat(k + i * kvDim, bb.getFloat(4 * k));
+                    if (i < numTokensRead) {
+                        for (int k = 0; k < kvDim; k++) {
+                            valueCache[nLayer].setFloat(k + i * kvDim, bb.getFloat(4 * k));
+                        }
                     }
                 }
             }
+            return numTokensRead;
         }
         
-        /**
-         * Gets the number of tokens in a state cache.
-         * @param is input-stream of state cache file
-         * @return number of tokens
-         * @throws IOException in case of an IO error
-         */
-        public int getDeserializedTokensSize(InputStream is) throws IOException {
-            ByteBuffer bb = ByteBuffer.allocate(12);
-            read(is, bb, 12);
-            check(bb, 0, MAGIC_STATE_CACHE, "MAGIC_STATE_CACHE");
-            check(bb, 4, MAGIC_STATE_VERSION, "MAGIC_STATE_VERSION");
-            return bb.getInt(8);
-        }
-
         static void check(ByteBuffer bb, int offset, int expected, String name) throws IOException {
             final int actual = bb.getInt(offset);
             if (actual != expected) {
@@ -1065,7 +1108,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         static void check(ByteBuffer bb, int offset, int expected, String name, Tokenizer tokenizer) throws IOException {
             final int actual = bb.getInt(offset);
             if (actual != expected) {
-                throw new IOException(String.format("Unexpected value '%s': actual=0x%x ('%s'), expected=0x%x ('%s')",
+                throw new IOException(String.format("Unexpected value '%s': actual=%d ('%s'), expected=%d ('%s')",
                         name, expected, tokenizer.decode(Collections.singletonList(expected)), actual, tokenizer.decode(Collections.singletonList(actual))));
             }
         }
@@ -2362,7 +2405,7 @@ final class AOT {
             try (FileChannel fileChannel = FileChannel.open(path, StandardOpenOption.READ)) {
                 return new PartialModel(
                         path.getFileName().toString(),
-                        ModelLoader.loadModel(fileChannel, gguf, Llama3.Options.DEFAULT_MAX_TOKENS, false),
+                        ModelLoader.loadModel(path, fileChannel, gguf, Llama3.Options.DEFAULT_MAX_TOKENS, false),
                         gguf.getTensorDataOffset(),
                         gguf.getTensorInfos()
                 );

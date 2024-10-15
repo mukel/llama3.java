@@ -21,6 +21,7 @@ Besides the educational value, this project will be used to test and tune compil
  - Support for Q8_0 and Q4_0 quantizations
  - Fast matrix-vector multiplication routines for quantized tensors using Java's [Vector API](https://openjdk.org/jeps/469)
  - Simple CLI with `--chat` and `--instruct` modes.
+ - Support for caching of states (e.g. the system-prompt)
 
 Here's the interactive `--chat` mode in action: 
 
@@ -82,7 +83,7 @@ chmod +x Llama3.java
 ## Run from source
 
 ```bash
-java --enable-preview --source 21 --add-modules jdk.incubator.vector LLama3.java -i --model Meta-Llama-3-8B-Instruct-Q4_0.gguf
+java --enable-preview --source 21 --add-modules jdk.incubator.vector Llama3.java -i --model Meta-Llama-3-8B-Instruct-Q4_0.gguf
 ```
 
 #### Optional: Makefile + manually build and run
@@ -128,6 +129,19 @@ PRELOAD_GGUF=/path/to/model.gguf make native
 
 A specialized, larger binary will be generated, with no parsing overhead for that particular model.
 It can still run other models, although incurring the usual parsing overhead.
+
+### State cache
+Save the internal states of a system prompt.
+
+```bash
+java --enable-preview --source 21 --add-modules jdk.incubator.vector Llama3.java --model Llama-3.2-3B-Instruct-Q4_0.gguf --write-state-cache true --state-cache prompt_cucko.ggsc -sp "You are a helpful cuckoo clock at the floor wall in front of the living-room. You like to talk about Java and its bytecode." -p "Hi!"
+```
+
+Read the stored states of the system prompt.
+
+```bash
+java --enable-preview --source 21 --add-modules jdk.incubator.vector Llama3.java --model Llama-3.2-3B-Instruct-Q4_0.gguf --read-state-cache true --state-cache prompt_cucko.ggsc -sp "You are a helpful cuckoo clock at the floor wall in front of the living-room. You like to talk about Java and its bytecode." -i
+```
 
 ## Performance
 
