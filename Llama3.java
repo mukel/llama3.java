@@ -3,6 +3,7 @@
 //PREVIEW
 //COMPILE_OPTIONS --add-modules=jdk.incubator.vector
 //RUNTIME_OPTIONS --add-modules=jdk.incubator.vector
+//MAIN com.llama4j.Llama3
 
 // Practical Llama 3 (and 3.1) inference in a single Java file
 // Author: Alfonso² Peterssen
@@ -22,6 +23,7 @@ import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.FloatVector;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
+import sun.misc.Unsafe;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -34,13 +36,16 @@ import java.io.PrintStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntConsumer;
@@ -209,6 +214,8 @@ public class Llama3 {
             float temperature, float topp, long seed, int maxTokens, boolean stream, boolean echo,
             Path stateCachePath, boolean readStateCache, boolean writeStateCache) {
 
+        static final int DEFAULT_MAX_TOKENS = 512;
+
         Options {
             require(modelPath != null, "Missing argument: --model <path> is required");
             require(interactive || prompt != null, "Missing argument: --prompt is required in --instruct mode e.g. --prompt \"Why is the sky blue?\"");
@@ -237,7 +244,7 @@ public class Llama3 {
             out.println("  --temperature, -temp <float>  temperature in [0,inf], default 0.1");
             out.println("  --top-p <float>               p value in top-p (nucleus) sampling in [0,1] default 0.95");
             out.println("  --seed <long>                 random seed, default System.nanoTime()");
-            out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default 512");
+            out.println("  --max-tokens, -n <int>        number of steps to run for < 0 = limited by context length, default " + DEFAULT_MAX_TOKENS);
             out.println("  --stream <boolean>            print tokens during generation; may cause encoding artifacts for non ASCII text, default true");
             out.println("  --echo <boolean>              print ALL tokens to stderr, if true, recommended to set --stream=false, default false");
             out.println("  --state-cache <path>          optional, path to state-cache file (.ggst)");
@@ -245,11 +252,11 @@ public class Llama3 {
             out.println("  --write-state-cache <boolean> write state-cache file");
             out.println();
             out.println("Examples:");
-            out.println("  jbang Llama3.java --model llama3-8b-q4_0.gguf --prompt \"Tell me a joke\"");
-            out.println("  jbang Llama3.java --model llama3-8b-q4_0.gguf --system-prompt \"Reply concisely, in French\" --prompt \"Who was Marie Curie?\"");
-            out.println("  jbang Llama3.java --model llama3-8b-q4_0.gguf --system-prompt \"Answer concisely\" --chat");
-            out.println("  jbang Llama3.java --model llama3-8b-q4_0.gguf --chat");
-            out.println("  jbang Llama3.java --model llama3-8b-q4_0.gguf --prompt \"Print 5 emojis\" --stream=false");
+            out.println("  jbang Llama3.java --model llama3.2-1b-q4_0.gguf --prompt \"Tell me a joke\"");
+            out.println("  jbang Llama3.java --model llama3.2-1b-q4_0.gguf --system-prompt \"Reply concisely, in French\" --prompt \"Who was Marie Curie?\"");
+            out.println("  jbang Llama3.java --model llama3.2-1b-q4_0.gguf --system-prompt \"Answer concisely\" --chat");
+            out.println("  jbang Llama3.java --model llama3.2-1b-q4_0.gguf --chat");
+            out.println("  jbang Llama3.java --model llama3.2-1b-q4_0.gguf --prompt \"Print 5 emojis\" --stream=false");
         }
 
         static Options parseOptions(String[] args) {
@@ -260,7 +267,7 @@ public class Llama3 {
             Path modelPath = null;
             long seed = System.nanoTime();
             // Keep max context length small for low-memory devices.
-            int maxTokens = 512;
+            int maxTokens = DEFAULT_MAX_TOKENS;
             boolean interactive = false;
             boolean stream = true;
             boolean echo = false;
@@ -314,7 +321,11 @@ public class Llama3 {
 
     public static void main(String[] args) throws IOException {
         Options options = Options.parseOptions(args);
-        Llama model = ModelLoader.loadModel(options.modelPath(), options.maxTokens());
+        Llama model = AOT.tryUsePreLoaded(options.modelPath(), options.maxTokens());
+        if (model == null) {
+            // No compatible preloaded model found, fallback to fully parse and load the specified file.
+            model = ModelLoader.loadModel(options.modelPath(), options.maxTokens(), true);
+        }
         Sampler sampler = selectSampler(model.configuration().vocabularySize, options.temperature(), options.topp(), options.seed());
         if (options.interactive()) {
             runInteractive(model, sampler, options);
@@ -334,10 +345,18 @@ final class GGUF {
     private int alignment;
     private int metadata_kv_count; // uint64_t
     private Map<String, Object> metadata;
+
+    public Map<String, GGUFTensorInfo> getTensorInfos() {
+        return tensorInfos;
+    }
+
     private Map<String, GGUFTensorInfo> tensorInfos;
+
     private long tensorDataOffset;
-    private MemorySegment tensorData; // memory mapped tensor data
-    private Map<String, GGMLTensorEntry> tensorEntries;
+
+    public long getTensorDataOffset() {
+        return tensorDataOffset;
+    }
 
     public Map<String, Object> getMetadata() {
         return metadata;
@@ -347,10 +366,6 @@ final class GGUF {
     private final ByteBuffer BB_2 = ByteBuffer.allocate(Short.BYTES).order(ByteOrder.LITTLE_ENDIAN);
     private final ByteBuffer BB_4 = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
     private final ByteBuffer BB_8 = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-
-    public Map<String, GGMLTensorEntry> getTensorEntries() {
-        return tensorEntries;
-    }
 
     public static GGUF loadModel(Path modelPath) throws IOException {
         try (FileChannel fileChannel = FileChannel.open(modelPath);
@@ -436,16 +451,20 @@ final class GGUF {
         // should be padded to `ALIGNMENT` bytes.
         // uint8_t tensor_data[];
         this.tensorDataOffset = fileChannel.position();
+    }
+
+    public static Map<String, GGMLTensorEntry> loadTensors(FileChannel fileChannel, long tensorDataOffset, Map<String, GGUFTensorInfo> tensorInfos) throws IOException {
         Arena arena = Arena.ofAuto();
-        this.tensorData = fileChannel.map(FileChannel.MapMode.READ_ONLY, tensorDataOffset, fileChannel.size() - tensorDataOffset, arena);
-        this.tensorEntries = HashMap.newHashMap(tensorInfos.size());
-        for (Map.Entry<String, GGUF.GGUFTensorInfo> entry : tensorInfos.entrySet()) {
-            GGUF.GGUFTensorInfo ti = entry.getValue();
+        MemorySegment tensorData = fileChannel.map(FileChannel.MapMode.READ_ONLY, tensorDataOffset, fileChannel.size() - tensorDataOffset, arena);
+        Map<String, GGMLTensorEntry> tensorEntries = HashMap.newHashMap(tensorInfos.size());
+        for (Map.Entry<String, GGUFTensorInfo> entry : tensorInfos.entrySet()) {
+            GGUFTensorInfo ti = entry.getValue();
             int numberOfElements = FloatTensor.numberOfElements(ti.dimensions());
             int sizeInBytes = Math.toIntExact(ti.ggmlType().byteSizeFor(numberOfElements));
             MemorySegment memorySegment = tensorData.asSlice(ti.offset(), sizeInBytes);
             tensorEntries.put(ti.name(), new GGMLTensorEntry(tensorData, ti.name(), ti.ggmlType(), ti.dimensions(), memorySegment));
         }
+        return tensorEntries;
     }
 
     public record GGUFTensorInfo(String name, int[] dimensions, GGMLType ggmlType, long offset) {
@@ -714,18 +733,17 @@ final class ModelLoader {
         return new Vocabulary(tokens, null);
     }
 
-    public static Llama loadModel(Path ggufPath, int contextLength) throws IOException {
-        try (var ignored = Timer.log("Load LlaMa model")) {
-            GGUF gguf = GGUF.loadModel(ggufPath);
-            Map<String, Object> metadata = gguf.getMetadata();
+    public static Llama loadModel(Path ggufPath, int contextLength, boolean loadWeights) throws IOException {
+        GGUF gguf = GGUF.loadModel(ggufPath);
+        FileChannel fileChannel = FileChannel.open(ggufPath, StandardOpenOption.READ);
+        return loadModel(fileChannel, gguf, contextLength, loadWeights);
+    }
 
+    public static Llama loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights) throws IOException {
+        try (var ignored = Timer.log("Load LlaMa model")) {
+            Map<String, Object> metadata = gguf.getMetadata();
             Vocabulary vocabulary = loadVocabulary(metadata);
             Tokenizer tokenizer = createTokenizer(metadata, vocabulary);
-
-            int modelContextLength = (int) metadata.get("llama.context_length");
-            if (contextLength < 0 || modelContextLength < contextLength) {
-                contextLength = modelContextLength;
-            }
 
             Llama.Configuration config = new Llama.Configuration(
                     (int) metadata.get("llama.embedding_length"),
@@ -738,42 +756,52 @@ final class ModelLoader {
                             : (int) metadata.get("llama.attention.head_count"),
 
                     vocabulary.size(),
-                    contextLength,
-                    false,
+                    (int) metadata.get("llama.context_length"),
                     (float) metadata.getOrDefault("llama.attention.layer_norm_rms_epsilon", 1e-5f),
                     (float) metadata.getOrDefault("llama.rope.freq_base", 10000f)
-            );
+            ).withContextLength(contextLength);
 
-            boolean ropeScaling = "Meta-Llama-3.1".equals(metadata.get("general.basename"));
-            float scaleFactor = 8;
-            float loFreqFactor = 1;
-            float hiFreqFactor = 3;
-            int oldContextLength = 8192;
-            Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(config.contextLength, config.headSize, config.ropeTheta,
-                    ropeScaling, scaleFactor, loFreqFactor, hiFreqFactor, oldContextLength);
-            float[] ropeFreqsReal = ropeFreqs.first();
-            float[] ropeFreqsImag = ropeFreqs.second();
-
-            Map<String, GGMLTensorEntry> tensorEntries = gguf.getTensorEntries();
-            Llama.Weights qw = new Llama.Weights(
-                    loadQuantized(tensorEntries.get("token_embd.weight")),
-                    loadArrayOfFloatBuffer(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_norm.weight")),
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_q.weight")),
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_k.weight")),
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_v.weight")),
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_output.weight")),
-                    loadArrayOfFloatBuffer(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_norm.weight")),
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_gate.weight")), // w1
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_down.weight")), // w2
-                    loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_up.weight")), // w3
-                    toFloatBuffer(tensorEntries.get("output_norm.weight")),
-                    FloatBuffer.wrap(ropeFreqsReal),
-                    FloatBuffer.wrap(ropeFreqsImag),
-                    loadQuantized(tensorEntries.get("output.weight"))
-            );
-
-            return new Llama(config, tokenizer, qw);
+            Llama.Weights weights = null;
+            if (loadWeights) {
+                Map<String, GGMLTensorEntry> tensorEntries = GGUF.loadTensors(fileChannel, gguf.getTensorDataOffset(), gguf.getTensorInfos());
+                weights = loadWeights(tensorEntries, config);
+            }
+            return new Llama(config, tokenizer, weights);
         }
+    }
+
+    static Llama.Weights loadWeights(Map<String, GGMLTensorEntry> tensorEntries, Llama.Configuration config) {
+        boolean ropeScaling = tensorEntries.containsKey("rope_freqs");
+        float scaleFactor = 8;
+        float loFreqFactor = 1;
+        float hiFreqFactor = 3;
+        int oldContextLength = 8192;
+        Pair<float[], float[]> ropeFreqs = RoPE.precomputeFreqsCis(config.contextLength, config.headSize, config.ropeTheta,
+                ropeScaling, scaleFactor, loFreqFactor, hiFreqFactor, oldContextLength);
+        float[] ropeFreqsReal = ropeFreqs.first();
+        float[] ropeFreqsImag = ropeFreqs.second();
+
+        GGMLTensorEntry tokenEmbeddings = tensorEntries.get("token_embd.weight");
+        Llama.Weights qw = new Llama.Weights(
+                loadQuantized(tokenEmbeddings),
+                loadArrayOfFloatBuffer(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_norm.weight")),
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_q.weight")),
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_k.weight")),
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_v.weight")),
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".attn_output.weight")),
+                loadArrayOfFloatBuffer(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_norm.weight")),
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_gate.weight")), // w1
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_down.weight")), // w2
+                loadArrayOfQuantized(config.numberOfLayers, i -> tensorEntries.get("blk." + i + ".ffn_up.weight")), // w3
+                toFloatBuffer(tensorEntries.get("output_norm.weight")),
+                FloatBuffer.wrap(ropeFreqsReal),
+                FloatBuffer.wrap(ropeFreqsImag),
+                // If "output.weight" is not present then the embedding weights are tied/shared with the decoder.
+                // This is commonly referred as "tie word embeddings".
+                loadQuantized(tensorEntries.getOrDefault("output.weight", tokenEmbeddings))
+        );
+
+        return qw;
     }
 
     private static Tokenizer createTokenizer(Map<String, Object> metadata, Vocabulary vocabulary) {
@@ -854,12 +882,18 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         public final int numberOfKeyValueHeads; // number of key/value heads (can be < query heads because of multiquery)
         public final int vocabularySize; // vocabulary size, usually 256 (byte-level)
         public final int contextLength; // max sequence length
-        public final boolean sharedWeights;
         public final float rmsNormEps;
         public final float ropeTheta;
         public final int headSize;
 
-        public Configuration(int dim, int hiddenDim, int numberOfLayers, int numberOfHeads, int numberOfKeyValueHeads, int vocabularySize, int contextLength, boolean sharedWeights, float rmsNormEps, float ropeTheta) {
+        Configuration withContextLength(int newContextLength) {
+            if (newContextLength < 0) {
+                return this; // no change
+            }
+            return new Configuration(this.dim, this.hiddenDim, this.numberOfLayers, this.numberOfHeads, this.numberOfKeyValueHeads, this.vocabularySize, newContextLength, this.rmsNormEps, this.ropeTheta);
+        }
+
+        public Configuration(int dim, int hiddenDim, int numberOfLayers, int numberOfHeads, int numberOfKeyValueHeads, int vocabularySize, int contextLength, float rmsNormEps, float ropeTheta) {
             this.dim = dim;
             this.hiddenDim = hiddenDim;
             this.numberOfLayers = numberOfLayers;
@@ -867,7 +901,6 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
             this.numberOfKeyValueHeads = numberOfKeyValueHeads;
             this.vocabularySize = vocabularySize;
             this.contextLength = contextLength;
-            this.sharedWeights = sharedWeights;
             this.rmsNormEps = rmsNormEps;
             this.ropeTheta = ropeTheta;
             this.headSize = dim / numberOfHeads;
@@ -1064,10 +1097,10 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         out.mapWithIndexInPlace(0, size, (value, index) -> weight.get(index) * (finalss * x.getFloat(index)));
     }
 
-    static FloatTensor forward(Llama model, Llama.State state, int token, int position) {
+    static FloatTensor forward(Llama model, State state, int token, int position) {
         // a few convenience variables
-        Llama.Configuration config = model.configuration();
-        Llama.Weights weights = model.weights();
+        Configuration config = model.configuration();
+        Weights weights = model.weights();
         int dim = config.dim;
         int headSize = config.headSize;
         int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
@@ -1604,10 +1637,34 @@ enum GGMLType {
  * e.g. can represent a sequence of quantized floats.
  */
 abstract class FloatTensor {
-    static final ValueLayout.OfFloat JAVA_FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
-    static final ValueLayout.OfShort JAVA_SHORT_LE = ValueLayout.JAVA_SHORT.withOrder(ByteOrder.LITTLE_ENDIAN);
-
     static final boolean USE_VECTOR_API = Boolean.parseBoolean(System.getProperty("llama.VectorAPI", "true"));
+
+    // static final ValueLayout.OfFloat JAVA_FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
+    // static final ValueLayout.OfShort JAVA_SHORT_LE = ValueLayout.JAVA_SHORT.withOrder(ByteOrder.LITTLE_ENDIAN);
+
+
+    // The use of Unsafe in this file is a temporary workaround to support native-image.
+    static final Unsafe UNSAFE;
+
+    static {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            UNSAFE = (Unsafe) f.get(null);
+        } catch (NoSuchFieldException | IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    static short readShort(MemorySegment memorySegment, long offset) {
+        // The MemorySegment.get* methods should be used instead.
+        return UNSAFE.getShort(memorySegment.address() + offset);
+    }
+
+    static byte readByte(MemorySegment memorySegment, long offset) {
+        // The MemorySegment.get* methods should be used instead.
+        return UNSAFE.getByte(memorySegment.address() + offset);
+    }
 
     // Preferred vector size for the fast multiplication routines.
     // (Apple Silicon) NEON only supports up-to 128bit vectors.
@@ -1803,13 +1860,13 @@ final class Q4_0FloatTensor extends FloatTensor {
         assert 0 <= index && index < size;
         int blockIndex = index / GGMLType.Q4_0.getBlockSize();
         int blockOffset = blockIndex * GGMLType.Q4_0.getTypeSize();
-        float scale = Float.float16ToFloat(memorySegment.get(JAVA_SHORT_LE, blockOffset));
+        float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
         byte quant;
         int modIndex = index % GGMLType.Q4_0.getBlockSize();
         if (modIndex < GGMLType.Q4_0.getBlockSize() / 2) {
-            quant = (byte) (memorySegment.get(ValueLayout.JAVA_BYTE, blockOffset + Float16.BYTES + modIndex) & 0x0F);
+            quant = (byte) (readByte(memorySegment, blockOffset + Float16.BYTES + modIndex) & 0x0F);
         } else {
-            quant = (byte) ((memorySegment.get(ValueLayout.JAVA_BYTE, blockOffset + Float16.BYTES + modIndex - GGMLType.Q4_0.getBlockSize() / 2) >>> 4) & 0x0F);
+            quant = (byte) ((readByte(memorySegment, blockOffset + Float16.BYTES + modIndex - GGMLType.Q4_0.getBlockSize() / 2) >>> 4) & 0x0F);
         }
         quant -= 8;
         return quant * scale;
@@ -1818,13 +1875,13 @@ final class Q4_0FloatTensor extends FloatTensor {
     @Override
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
         if (FloatTensor.USE_VECTOR_API) {
-            return vectorDot(this, thisOffset, that, thatOffset, size);
+            return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
         } else {
             return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
         }
     }
 
-    private static float vectorDot(Q4_0FloatTensor thiz, int thisOffset, FloatTensor that, int thatOffset, int size) {
+    private static float vectorDot(Q4_0FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
         float result = 0f;
         int j = 0;
 
@@ -1841,7 +1898,7 @@ final class Q4_0FloatTensor extends FloatTensor {
         int blockOffset = (thisOffset + j) / GGMLType.Q4_0.getBlockSize() * GGMLType.Q4_0.getTypeSize();
         int upperBound = size / GGMLType.Q4_0.getBlockSize() * GGMLType.Q4_0.getBlockSize();
         for (; j < upperBound; j += GGMLType.Q4_0.getBlockSize(), blockOffset += GGMLType.Q4_0.getTypeSize()) {
-            float wScaleValue = Float.float16ToFloat(thiz.memorySegment.get(JAVA_SHORT_LE, blockOffset));
+            float wScaleValue = Float.float16ToFloat(readShort(thiz.memorySegment, blockOffset));
             var wScale = FloatVector.broadcast(F_SPECIES, wScaleValue);
             var B_SPECIES = ByteVector.SPECIES_128;
             var wBytes = ByteVector.fromMemorySegment(B_SPECIES, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
@@ -1914,8 +1971,8 @@ final class Q8_0FloatTensor extends FloatTensor {
         int blockIndex = index / GGMLType.Q8_0.getBlockSize();
         int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
         int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
-        byte quant = memorySegment.get(ValueLayout.JAVA_BYTE, blockOffset + Float16.BYTES + withinBlockIndex);
-        float scale = Float.float16ToFloat(memorySegment.get(JAVA_SHORT_LE, blockOffset));
+        byte quant = readByte(memorySegment, blockOffset + Float16.BYTES + withinBlockIndex);
+        float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
         return quant * scale;
     }
 
@@ -1924,13 +1981,13 @@ final class Q8_0FloatTensor extends FloatTensor {
     @Override
     public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
         if (FloatTensor.USE_VECTOR_API) {
-            return vectorDot(this, thisOffset, that, thatOffset, size);
+            return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
         } else {
             return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
         }
     }
 
-    private static float vectorDot(Q8_0FloatTensor thiz, int thisOffset, FloatTensor that, int thatOffset, int size) {
+    private static float vectorDot(Q8_0FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
         float result = 0f;
         int j = 0;
 
@@ -1947,7 +2004,7 @@ final class Q8_0FloatTensor extends FloatTensor {
         int blockOffset = (thisOffset + j) / GGMLType.Q8_0.getBlockSize() * GGMLType.Q8_0.getTypeSize();
         int upperBound = size / GGMLType.Q8_0.getBlockSize() * GGMLType.Q8_0.getBlockSize();
         for (; j < upperBound; j += GGMLType.Q8_0.getBlockSize(), blockOffset += GGMLType.Q8_0.getTypeSize()) {
-            float wScaleValue = Float.float16ToFloat(thiz.memorySegment.get(JAVA_SHORT_LE, blockOffset));
+            float wScaleValue = Float.float16ToFloat(readShort(thiz.memorySegment, blockOffset));
             var wScale = FloatVector.broadcast(F_SPECIES, wScaleValue);
             if (F_SPECIES.vectorBitSize() == 256) {
                 var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_256, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
@@ -2032,7 +2089,7 @@ final class ArrayFloatTensor extends FloatTensor {
 
 final class RoPE {
     public static Pair<float[], float[]> precomputeFreqsCis(int contextLength, int headSize, double theta,
-        boolean ropeScaling, float scaleFactor, float loFreqFactor, float hiFreqFactor, float oldContextLength) {
+                                                            boolean ropeScaling, float scaleFactor, float loFreqFactor, float hiFreqFactor, float oldContextLength) {
         assert headSize % 2 == 0;
         float[] cr = new float[contextLength * (headSize / 2)];
         float[] ci = new float[contextLength * (headSize / 2)];
@@ -2206,13 +2263,14 @@ final class ToppSampler implements Sampler {
  */
 class ChatFormat {
 
-    protected final Tokenizer tokenizer;
-    protected final int beginOfText;
-    protected final int endHeader;
-    protected final int startHeader;
-    protected final int endOfTurn;
-    protected final int endOfText;
-    protected final int endOfMessage;
+    final Tokenizer tokenizer;
+    final int beginOfText;
+    final int endHeader;
+    final int startHeader;
+    final int endOfTurn;
+    final int endOfText;
+    final int endOfMessage;
+    final Set<Integer> stopTokens;
 
     public ChatFormat(Tokenizer tokenizer) {
         this.tokenizer = tokenizer;
@@ -2223,6 +2281,7 @@ class ChatFormat {
         this.endOfTurn = specialTokens.get("<|eot_id|>");
         this.endOfText = specialTokens.get("<|end_of_text|>");
         this.endOfMessage = specialTokens.getOrDefault("<|eom_id|>", -1); // only in 3.1
+        this.stopTokens = Set.of(endOfText, endOfTurn);
     }
 
     public Tokenizer getTokenizer() {
@@ -2230,7 +2289,7 @@ class ChatFormat {
     }
 
     public Set<Integer> getStopTokens() {
-        return Set.of(endOfText, endOfTurn);
+        return stopTokens;
     }
 
     public List<Integer> encodeHeader(ChatFormat.Message message) {
@@ -2277,4 +2336,65 @@ class ChatFormat {
     }
 }
 
+/**
+ * Support for AOT preloading of GGUF metadata with GraalVM's Native Image.
+ *
+ * <p>
+ * To preload a model at build time, pass {@code -Dllama.PreloadGGUF=/path/to/model.gguf}
+ * to the native-image builder command. At runtime, the preloaded model will be used
+ * iff the specified and preloaded file names (base name) match.
+ */
+final class AOT {
+    record PartialModel(String modelFileName, Llama model, long tensorDataOffset, Map<String, GGUF.GGUFTensorInfo> tensorInfos) {}
 
+    private static final PartialModel PRELOADED_GGUF = preLoadGGUF(System.getProperty("llama.PreloadGGUF"));
+
+    private static PartialModel preLoadGGUF(String modelPath) {
+        if (modelPath == null || modelPath.isEmpty()) {
+            return null;
+        }
+        try {
+            Path path = Path.of(modelPath);
+            if (!Files.exists(path) || !Files.isRegularFile(path)) {
+                throw new IllegalArgumentException("Cannot pre-load model: " + path);
+            }
+            GGUF gguf = GGUF.loadModel(path);
+            try (FileChannel fileChannel = FileChannel.open(path, StandardOpenOption.READ)) {
+                return new PartialModel(
+                        path.getFileName().toString(),
+                        ModelLoader.loadModel(fileChannel, gguf, Llama3.Options.DEFAULT_MAX_TOKENS, false),
+                        gguf.getTensorDataOffset(),
+                        gguf.getTensorInfos()
+                );
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Tries to reuse a compatible AOT preloaded model.
+     * The file name (base name) must match with the preloaded file name.
+     * No checksum/hash is checked for performance reasons.
+     */
+    public static Llama tryUsePreLoaded(Path modelPath, int contextLength) throws IOException {
+        AOT.PartialModel preLoaded = AOT.PRELOADED_GGUF;
+        if (preLoaded == null) {
+            return null; // no pre-loaded model stored
+        }
+        String optionsModel = modelPath.getFileName().toString();
+        String preLoadedModel = preLoaded.modelFileName();
+        if (!Objects.equals(optionsModel, preLoadedModel)) {
+            // Preloaded and specified model file names didn't match.
+            return null;
+        }
+        Llama baseModel = preLoaded.model();
+        try (var timer = Timer.log("Load tensors from pre-loaded model");
+             var fileChannel = FileChannel.open(modelPath, StandardOpenOption.READ)) {
+            // Load only the tensors (mmap slices).
+            Map<String, GGMLTensorEntry> tensorEntries = GGUF.loadTensors(fileChannel, preLoaded.tensorDataOffset(), preLoaded.tensorInfos());
+            Llama.Weights weights = ModelLoader.loadWeights(tensorEntries, baseModel.configuration());
+            return new Llama(baseModel.configuration().withContextLength(contextLength), baseModel.tokenizer(), weights);
+        }
+    }
+}

@@ -1,9 +1,9 @@
 # Llama3.java
 
-Practical [Llama 3](https://github.com/meta-llama/llama3) and [3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1) inference implemented in a single Java file.
+Practical [Llama 3](https://github.com/meta-llama/llama3), [3.1](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1) and [3.2](https://ai.meta.com/blog/llama-3-2-connect-2024-vision-edge-mobile-devices/) inference implemented in a single Java file.
 
 <p align="center">
-  <img width="700" src="https://github.com/mukel/llama3.java/assets/1896283/7939588c-c0ff-4261-b67f-8a54bad59ab5">
+  <img width="700" src="https://github.com/user-attachments/assets/69bbf681-ae84-4a46-bcd6-746dbd421a6e">
 </p>
 
 This project is the successor of [llama2.java](https://github.com/mukel/llama2.java)
@@ -17,7 +17,7 @@ Besides the educational value, this project will be used to test and tune compil
  - [GGUF format](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) parser
  - Llama 3 tokenizer based on [minbpe](https://github.com/karpathy/minbpe)
  - Llama 3 inference with Grouped-Query Attention
- - Support Llama 3.1 (ad-hoc RoPE scaling)
+ - Support Llama 3.1 (ad-hoc RoPE scaling) and 3.2 (tie word embeddings)
  - Support for Q8_0 and Q4_0 quantizations
  - Fast matrix-vector multiplication routines for quantized tensors using Java's [Vector API](https://openjdk.org/jeps/469)
  - Simple CLI with `--chat` and `--instruct` modes.
@@ -25,33 +25,41 @@ Besides the educational value, this project will be used to test and tune compil
 Here's the interactive `--chat` mode in action: 
 
 <p align="center">
-  <img width="700" src="https://github.com/mukel/llama3.java/assets/1896283/2245f59d-6c86-49c3-87d3-8b1a2cb83a91">
+  <img width="700" src="https://github.com/user-attachments/assets/f609bb73-7f11-4ea0-9ec7-43fbd3c96d3b">
 </p>
 
 ## Setup
 
-Download pure `Q4_0` and (optionally) `Q8_0` quantized .gguf files from:  
+Download pure `Q4_0` and (optionally) `Q8_0` quantized .gguf files from:
+  - https://huggingface.co/mukel/Llama-3.2-1B-Instruct-GGUF
+  - https://huggingface.co/mukel/Llama-3.2-3B-Instruct-GGUF
   - https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF
   - https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF
 
-The `~4.3GB` pure `Q4_0` quantized model is recommended, please be gentle with [huggingface.co](https://huggingface.co) servers: 
+The pure `Q4_0` quantized models are recommended, except for the very small models (1B), please be gentle with [huggingface.co](https://huggingface.co) servers: 
 ```
-# Llama 3.1
+# Llama 3.2 (3B)
+curl -L -O https://huggingface.co/mukel/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_0.gguf
+
+# Llama 3.2 (1B)
+curl -L -O https://huggingface.co/mukel/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q8_0.gguf
+
+# Llama 3.1 (8B)
 curl -L -O https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_0.gguf
 
-# Llama 3
+# Llama 3 (8B)
 curl -L -O https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q4_0.gguf
 
-# Optionally download the Q8_0 quantized model ~8GB
-# curl -L -O https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q8_0.gg
+# Optionally download the Q8_0 quantized models
+# curl -L -O https://huggingface.co/mukel/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q8_0.gguf
 # curl -L -O https://huggingface.co/mukel/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf
 ```
 
 #### Optional: quantize to pure `Q4_0` manually
 
-In the wild, `Q8_0` quantizations are fine, but `Q4_0` quantizations are rarely pure e.g. the `output.weights` tensor is quantized with `Q6_K`, instead of `Q4_0`.  
+In the wild, `Q8_0` quantizations are fine, but `Q4_0` quantizations are rarely pure e.g. the `token_embd.weights`/`output.weights` tensor are quantized with `Q6_K`, instead of `Q4_0`.  
 A **pure** `Q4_0` quantization can be generated from a high precision (F32, F16, BFLOAT16) .gguf source 
-with the `quantize` utility from [llama.cpp](https://github.com/ggerganov/llama.cpp) as follows:
+with the `llama-quantize` utility from [llama.cpp](https://github.com/ggerganov/llama.cpp) as follows:
 
 ```bash
 ./llama-quantize --pure ./Meta-Llama-3-8B-Instruct-F32.gguf ./Meta-Llama-3-8B-Instruct-Q4_0.gguf Q4_0
@@ -90,64 +98,75 @@ Run the resulting `llama3.jar` as follows:
 java --enable-preview --add-modules jdk.incubator.vector -jar llama3.jar --help
 ```
 
+### GraalVM Native Image
+
+Compile to native via `make` (recommended):
+
+```bash
+make native
+```
+Or directly:
+
+```bash
+native-image -H:+UnlockExperimentalVMOptions	-H:+VectorAPISupport -H:+ForeignAPISupport -O3 -march=native --enable-preview --add-modules jdk.incubator.vector --initialize-at-build-time=com.llama4j.FloatTensor -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 -jar llama3.jar -o llama3
+```
+
+Run as Native Image:
+
+```bash
+./llama3 --model Llama-3.2-1B-Instruct-Q8_0 --chat
+```
+
+### AOT model preloading
+
+`Llama3.java` supports AOT model preloading, enabling **0-overhead, instant inference, with minimal TTFT (time-to-first-token)**.
+
+To AOT pre-load a GGUF model:
+```bash
+PRELOAD_GGUF=/path/to/model.gguf make native
+```
+
+A specialized, larger binary will be generated, with no parsing overhead for that particular model.
+It can still run other models, although incurring the usual parsing overhead.
+
 ## Performance
 
-**Important Note**  
-On GraalVM, please note that the Graal compiler doesn't support the Vector API yet, run with `-Dllama.VectorAPI=false`, but expect sub-optimal performance.   
-Vanilla OpenJDK 21+ is recommended for now, which supports the Vector API.
+GraalVM now supports more [Vector API](https://openjdk.org/jeps/469) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from [`oracle-graalvm-ea-builds`](https://github.com/graalvm/oracle-graalvm-ea-builds) or sdkman: `sdk install java 24.ea.15-graal`.
 
-### llama.cpp
+#### llama.cpp
 
-Vanilla `llama.cpp` built with `make -j 20`.
+Vanilla `llama.cpp` built with `make`.
 ```bash
-./main --version
-version: 2879 (4f026363)
-built with cc (GCC) 13.2.1 20230801 for x86_64-pc-linux-gnu
+./llama-cli --version                                                                                                                                                                          130 ↵
+version: 3862 (3f1ae2e3)
+built with cc (GCC) 14.2.1 20240805 for x86_64-pc-linux-gnu
 ```
 
 Executed as follows:
 ```bash
-./main -m ../Meta-Llama-3-8B-Instruct-Q4_0.gguf \
-  -n 512 \
-  -s 42 \
-  -p "<|start_of_header_id|>user<|end_of_header_id|>Why is the sky blue?<|eot_id|><|start_of_header_id|>assistant<|end_of_header_id|>\n\n" \
-  --interactive-specials
+./llama-bench -m Llama-3.2-1B-Instruct-Q4_0.gguf -p 0 -n 128
 ```
-Collected the **"eval time"** metric in tokens\s.
 
-### Llama3.java
-Running on OpenJDK 21.0.2.
+#### Llama3.java
 
 ```bash
-jbang Llama3.java \
-  --model ./Meta-Llama-3-8B-Instruct-Q4_0.gguf \
-  --max-tokens 512 \
+taskset -c 0-15 ./llama3 \
+  --model ./Llama-3-1B-Instruct-Q4_0.gguf \
+  --max-tokens 128 \
   --seed 42 \
   --stream false \
   --prompt "Why is the sky blue?"
 ```
 
-### Results
-
-#### Notebook Intel 13900H 6pC+8eC/20T 64GB (5200) Linux 6.6.26 
-| Model                            | tokens/s | Implementation   |  
-|----------------------------------|----------|------------------|
-| Llama-3-8B-Instruct-Q4_0.gguf    | 7.53     | llama.cpp        |
-| Llama-3-8B-Instruct-Q4_0.gguf    | 6.95     | llama3.java      |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 5.16     | llama.cpp        |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 4.02     | llama3.java      |
-
-#### Workstation AMD 3950X 16C/32T 64GB (3200) Linux 6.6.25
+Hardware specs: 2019 AMD Ryzen 3950X 16C/32T 64GB (3800) Linux 6.6.47.
 
 ****Notes**  
-*Running on a single CCD e.g. `taskset -c 0-15 jbang Llama3.java ...` since inference is constrained by memory bandwidth.* 
+*Running on a single CCD e.g. `taskset -c 0-15 ./llama3 ...` since inference is constrained by memory bandwidth.* 
 
-| Model                            | tokens/s | Implementation   |  
-|----------------------------------|----------|------------------|
-| Llama-3-8B-Instruct-Q4_0.gguf    | 9.26     | llama.cpp        |
-| Llama-3-8B-Instruct-Q4_0.gguf    | 8.03     | llama3.java      |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 5.79     | llama.cpp        |
-| Llama-3-8B-Instruct-Q8_0.gguf    | 4.92     | llama3.java      |
+### Results
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/7f36f26a-6a78-46b7-9067-fcbe7717aa44">
+</p>
 
 ## License
 
