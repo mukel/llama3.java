@@ -21,12 +21,21 @@ Besides the educational value, this project will be used to test and tune compil
  - Support for Q8_0 and Q4_0 quantizations
  - Fast matrix-vector multiplication routines for quantized tensors using Java's [Vector API](https://openjdk.org/jeps/469)
  - Simple CLI with `--chat` and `--instruct` modes.
+ - GraalVM's Native Image support (EA builds [here](https://github.com/graalvm/oracle-graalvm-ea-builds))
+ - AOT model pre-loading for instant time-to-first-token
 
-Here's the interactive `--chat` mode in action: 
-
+**Interactive `--chat` mode in action:**
 <p align="center">
   <img width="700" src="https://github.com/user-attachments/assets/f609bb73-7f11-4ea0-9ec7-43fbd3c96d3b">
 </p>
+
+## [Practical LLM inference in modern Java](https://www.youtube.com/watch?v=zgAMxC7lzkc)
+**Presented at Devoxx Belgium, 2024**
+<div align="center">
+  <a href="https://www.youtube.com/watch?v=zgAMxC7lzkc">
+    <img src="https://img.youtube.com/vi/zgAMxC7lzkc/sddefault.jpg">
+  </a>
+</div>
 
 ## Setup
 
