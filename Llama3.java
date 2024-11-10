@@ -1126,6 +1126,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
     public static List<Integer> generateTokens(Llama model, State state, int startPosition, List<Integer> promptTokens, Set<Integer> stopTokens, int maxTokens, Sampler sampler, boolean echo,
                                                IntConsumer onTokenGenerated) {
         long startNanos = System.nanoTime();
+        long startGen = 0;
         if (maxTokens < 0 || model.configuration().contextLength < maxTokens) {
             maxTokens = model.configuration().contextLength;
         }
@@ -1149,6 +1150,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                 forward(model, state, tokens, position);
                 position += promptTokens.size() - promptIndex - 1;
                 promptIndex = promptTokens.size();
+                startGen = System.nanoTime();
             } else {
                 forward(model, state, new int[] {token}, position);
             }
@@ -1168,8 +1170,13 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         }
 
         long elapsedNanos = System.nanoTime() - startNanos;
+        long promptNanos = startGen - startNanos;
+        long genNanos = elapsedNanos - startGen + startNanos; 
         int totalTokens = promptIndex + generatedTokens.size();
-        System.err.printf("%n%.2f tokens/s (%d)%n", totalTokens / (elapsedNanos / 1_000_000_000.0), totalTokens);
+        System.err.printf("%n%.2f tokens/s (%d) [PrEval %.2f tokens/s (%d), TokGen %.2f tokens/s (%d)]%n",
+                totalTokens / (elapsedNanos / 1_000_000_000.0), totalTokens,
+                promptTokens.size() / (promptNanos / 1_000_000_000.0), promptTokens.size(),
+                generatedTokens.size() / (genNanos / 1_000_000_000.0), generatedTokens.size());
 
         return generatedTokens;
     }
