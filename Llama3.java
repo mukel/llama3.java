@@ -55,6 +55,8 @@ import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 public class Llama3 {
+    /** batch-size used in prompt evaluation */
+    private static final int BATCHSIZE = Integer.getInteger("llama.batchsize", 8);
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -101,7 +103,7 @@ public class Llama3 {
                 break;
             }
             if (state == null) {
-                state = model.createNewState();
+                state = model.createNewState(BATCHSIZE);
             }
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, userText)));
             conversationTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
@@ -133,7 +135,7 @@ public class Llama3 {
     }
 
     static void runInstructOnce(Llama model, Sampler sampler, Options options) {
-        Llama.State state = model.createNewState();
+        Llama.State state = model.createNewState(BATCHSIZE);
         ChatFormat chatFormat = new ChatFormat(model.tokenizer());
 
         List<Integer> promptTokens = new ArrayList<>();
@@ -808,8 +810,8 @@ final class ModelLoader {
 }
 
 record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) {
-    public State createNewState() {
-        State state = new State(configuration());
+    public State createNewState(int batchsize) {
+        State state = new State(configuration(), batchsize);
         state.latestToken = tokenizer.getSpecialTokens().get("<|begin_of_text|>");
         return state;
     }
@@ -891,32 +893,40 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
     public static final class State {
 
         // current wave of activations
-        public final FloatTensor x; // activation at current time stamp (dim,)
-        public final FloatTensor xb; // same, but inside a residual branch (dim,)
-        public final FloatTensor xb2; // an additional buffer just for convenience (dim,)
-        public final FloatTensor hb; // buffer for hidden dimension in the ffn (hidden_dim,)
-        public final FloatTensor hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
-        public final FloatTensor q; // query (dim,)
-        public final FloatTensor k; // key (dim,)
-        public final FloatTensor v; // value (dim,)
-        public final FloatTensor att; // buffer for scores/attention values (n_heads, seq_len)
+        public final int batchsize;
+        public final FloatTensor[] x; // activation at current time stamp (dim,)
+        public final FloatTensor[] xb; // same, but inside a residual branch (dim,)
+        public final FloatTensor[] xb2; // an additional buffer just for convenience (dim,)
+        public final FloatTensor[] hb; // buffer for hidden dimension in the ffn (hidden_dim,)
+        public final FloatTensor[] hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
+        public final FloatTensor[] q; // query (dim,)
+        public final FloatTensor[] k; // key (dim,)
+        public final FloatTensor[] v; // value (dim,)
+        public final FloatTensor[] att; // buffer for scores/attention values (n_heads, seq_len)
         public final FloatTensor logits; // output logits
+
         // kv cache
         public final FloatTensor[] keyCache;   // (n_layer, seq_len, kv_dim)
         public final FloatTensor[] valueCache; // (n_layer, seq_len, kv_dim)
+        
+        /** last index in previous block */
+        int idxPrevBlock;
 
         public int latestToken;
 
-        State(Configuration config) {
-            this.x = ArrayFloatTensor.allocate(config.dim);
-            this.xb = ArrayFloatTensor.allocate(config.dim);
-            this.xb2 = ArrayFloatTensor.allocate(config.dim);
-            this.hb = ArrayFloatTensor.allocate(config.hiddenDim);
-            this.hb2 = ArrayFloatTensor.allocate(config.hiddenDim);
-            this.q = ArrayFloatTensor.allocate(config.dim);
-            this.k = ArrayFloatTensor.allocate(config.dim);
-            this.v = ArrayFloatTensor.allocate(config.dim);
-            this.att = ArrayFloatTensor.allocate(config.numberOfHeads, config.contextLength);
+        State(Configuration config, int batchsize) {
+            this.batchsize = batchsize;
+            this.x = allocate(batchsize, config.dim);
+            this.xb = allocate(batchsize, config.dim);
+            this.xb2 = allocate(batchsize, config.dim);
+            this.hb = allocate(batchsize, config.hiddenDim);
+            this.hb2 = allocate(batchsize, config.hiddenDim);
+            this.q = allocate(batchsize, config.dim);
+            this.k = allocate(batchsize, config.dim);
+            this.v = allocate(batchsize, config.dim);
+            this.att = allocate(batchsize, config.numberOfHeads, config.contextLength);
+            idxPrevBlock = -1;
+
             this.logits = ArrayFloatTensor.allocate(config.vocabularySize);
             int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
             this.keyCache = Stream.generate(() -> ArrayFloatTensor.allocate(config.contextLength, kvDim)).limit(config.numberOfLayers).toArray(FloatTensor[]::new);
@@ -924,9 +934,9 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         }
     }
 
-    static FloatTensor[] allocate(FloatTensor ft0, int numTokens, int... dims) {
+    static FloatTensor[] allocate(int numTokens, int... dims) {
         return IntStream.range(0, numTokens)
-                .mapToObj(i -> (i == 0) ? ft0 : ArrayFloatTensor.allocate(dims))
+                .mapToObj(i -> ArrayFloatTensor.allocate(dims))
                 .toArray(FloatTensor[]::new);
     }
 
@@ -951,21 +961,11 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         int kvMul = config.numberOfHeads / config.numberOfKeyValueHeads; // integer multiplier of the kv sharing in multiquery
         float sqrtHeadSize = (float) Math.sqrt(headSize);
         
-        // We need states at each token.
         final int nTokens = tokens.length;
-        FloatTensor[] x = allocate(state.x, nTokens, config.dim);
-        FloatTensor[] xb = allocate(state.xb, nTokens, config.dim);
-        FloatTensor[] xb2 = allocate(state.xb2, nTokens, config.dim);
-        FloatTensor[] hb = allocate(state.hb, nTokens, config.hiddenDim);
-        FloatTensor[] hb2 = allocate(state.hb2, nTokens, config.hiddenDim);
-        FloatTensor[] q = allocate(state.q, nTokens, config.dim);
-        FloatTensor[] k = allocate(state.k, nTokens, config.dim);
-        FloatTensor[] v = allocate(state.v, nTokens, config.dim);
-        FloatTensor[] att = allocate(state.att, nTokens, config.numberOfHeads, config.contextLength);
 
         // copy the token embedding into x
         Parallel.parallelFor(0, nTokens, t ->
-            weights.token_embedding_table.copyTo(tokens[t] * dim, x[t], 0, dim)
+            weights.token_embedding_table.copyTo(tokens[t] * dim, state.x[t], 0, dim)
         );
 
         // forward all the layers
@@ -974,13 +974,13 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
             // rmsnorm(state.xb, state.x, weights.rms_att_weight[l], dim, config.rmsNormEps);
             final int curLayer = l;
             Parallel.parallelFor(0, nTokens, t ->
-                rmsnorm(xb[t], x[t], weights.rms_att_weight[curLayer], dim, config.rmsNormEps)
+                rmsnorm(state.xb[t], state.x[t], weights.rms_att_weight[curLayer], dim, config.rmsNormEps)
             );
 
             // qkv matmuls for this position
-            weights.wq[l].matmul(xb, q, dim, dim);
-            weights.wk[l].matmul(xb, k, kvDim, dim);
-            weights.wv[l].matmul(xb, v, kvDim, dim);
+            weights.wq[l].matmul(nTokens, state.xb, state.q, dim, dim);
+            weights.wk[l].matmul(nTokens, state.xb, state.k, kvDim, dim);
+            weights.wv[l].matmul(nTokens, state.xb, state.v, kvDim, dim);
 
             // RoPE relative positional encoding: complex-valued rotate q and k in each head
             Parallel.parallelFor(0, nTokens, t -> {
@@ -990,7 +990,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                     float fci = weights.freq_cis_imag.get((position + t) * (headSize / 2) + (head_dim / 2));
                     int rotn = i < kvDim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
                     for (int vi = 0; vi < rotn; vi++) {
-                        FloatTensor vec = vi == 0 ? q[t] : k[t]; // the vector to rotate (query or key)
+                        FloatTensor vec = vi == 0 ? state.q[t] : state.k[t]; // the vector to rotate (query or key)
                         float v0 = vec.getFloat(i);
                         float v1 = vec.getFloat(i + 1);
                         vec.setFloat(i, v0 * fcr - v1 * fci);
@@ -1002,8 +1002,8 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
             // save key,value at this time step (position) to our kv cache
             //int loff = l * config.seq_len * kvDim; // kv cache layer offset for convenience
             Parallel.parallelFor(0, nTokens, t -> {
-                k[t].copyTo(0, state.keyCache[curLayer], (position + t) * kvDim, kvDim);
-                v[t].copyTo(0, state.valueCache[curLayer], (position + t) * kvDim, kvDim);
+                state.k[t].copyTo(0, state.keyCache[curLayer], (position + t) * kvDim, kvDim);
+                state.v[t].copyTo(0, state.valueCache[curLayer], (position + t) * kvDim, kvDim);
             });
 
             // multihead attention. iterate over all heads
@@ -1024,82 +1024,78 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                     // float* k = s.key_cache + loff + t * dim + h * headSize;
                     int keyCacheOffset = /* loff + */ t * kvDim + (h / kvMul) * headSize;
                     // calculate the attention score as the dot product of q and k
-                    float score = q[token].dot(qOffset, state.keyCache[curLayer], keyCacheOffset, headSize);
+                    float score = state.q[token].dot(qOffset, state.keyCache[curLayer], keyCacheOffset, headSize);
                     score /= sqrtHeadSize;
                     // save the score to the attention buffer
-                    att[token].setFloat(attOffset + t, score);
+                    state.att[token].setFloat(attOffset + t, score);
                 }
 
                 // softmax the scores to get attention weights, from 0..position inclusively
-                att[token].softmaxInPlace(attOffset, position + token + 1);
+                state.att[token].softmaxInPlace(attOffset, position + token + 1);
 
                 // weighted sum of the values, store back into xb
                 // float* xb = s.xb + h * headSize;
                 int xbOffset = h * headSize;
                 // memset(xb, 0, headSize * sizeof(float));
-                xb[token].fillInPlace(xbOffset, headSize, 0f);
+                state.xb[token].fillInPlace(xbOffset, headSize, 0f);
 
                 for (int t = 0; t <= position + token; t++) {
                     // get the value vector for this head and at this timestep
                     // float* v = s.value_cache + loff + t * dim + h * headSize;
                     int vOffset = /* loff + */ t * kvDim + (h / kvMul) * headSize;
                     // get the attention weight for this timestep
-                    float a = att[token].getFloat(attOffset + t);
+                    float a = state.att[token].getFloat(attOffset + t);
                     // accumulate the weighted value into xb
-                    xb[token].saxpyInPlace(xbOffset, state.valueCache[curLayer], vOffset, headSize, a);
+                    state.xb[token].saxpyInPlace(xbOffset, state.valueCache[curLayer], vOffset, headSize, a);
                 }
             });
 
             // final matmul to get the output of the attention
-            weights.wo[l].matmul(xb, xb2, dim, dim);
+            weights.wo[l].matmul(nTokens, state.xb, state.xb2, dim, dim);
 
             // residual connection back into x
             Parallel.parallelFor(0, nTokens, t -> {
-                x[t].addInPlace(xb2[t]);
+                state.x[t].addInPlace(state.xb2[t]);
             });
 
             // ffn rmsnorm
             Parallel.parallelFor(0, nTokens, t -> {
-                rmsnorm(xb[t], x[t], weights.rms_ffn_weight[curLayer], dim, config.rmsNormEps);
+                rmsnorm(state.xb[t], state.x[t], weights.rms_ffn_weight[curLayer], dim, config.rmsNormEps);
             });
 
             // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
             // first calculate self.w1(x) and self.w3(x)
-            weights.w1[l].matmul(xb, hb, config.hiddenDim, dim);
-            weights.w3[l].matmul(xb, hb2, config.hiddenDim, dim);
+            weights.w1[l].matmul(nTokens, state.xb, state.hb, config.hiddenDim, dim);
+            weights.w3[l].matmul(nTokens, state.xb, state.hb2, config.hiddenDim, dim);
 
             // SwiGLU non-linearity
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
             Parallel.parallelFor(0, nTokens, t -> {
-                hb[t].mapInPlace(value -> value / (float) (1.0 + Math.exp(-value)));
+                state.hb[t].mapInPlace(value -> value / (float) (1.0 + Math.exp(-value)));
             });
 
             // elementwise multiply with w3(x)
             Parallel.parallelFor(0, nTokens, t -> {
-                hb[t].multiplyInPlace(hb2[t]);
+                state.hb[t].multiplyInPlace(state.hb2[t]);
             });
 
             // final matmul to get the output of the ffn
-            weights.w2[l].matmul(hb, xb, dim, config.hiddenDim);
+            weights.w2[l].matmul(nTokens, state.hb, state.xb, dim, config.hiddenDim);
 
             // residual connection
             Parallel.parallelFor(0, nTokens, t -> {
-                x[t].addInPlace(xb[t]);
+                state.x[t].addInPlace(state.xb[t]);
             });
         }
 
         // final rmsnorm
         Parallel.parallelFor(0, nTokens, t -> {
-            rmsnorm(x[t], x[t], weights.rms_final_weight, dim, config.rmsNormEps);
+            rmsnorm(state.x[t], state.x[t], weights.rms_final_weight, dim, config.rmsNormEps);
         });
         
-        if (nTokens > 1) {
-            // Copy temporary x of the last token into state.x.
-            x[nTokens - 1].copyTo(0, state.x, 0, config.dim);
-        }
-
         // classifier into logits
-        weights.wcls.matmul(state.x, state.logits, config.vocabularySize, dim);
+        weights.wcls.matmul(state.x[nTokens - 1], state.logits, config.vocabularySize, dim);
+        state.idxPrevBlock = nTokens - 1;
 
         return state.logits;
     }
@@ -1136,8 +1132,9 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         int promptIndex = 0;
         for (int position = startPosition; position < maxTokens; ++position) {
             if (promptIndex < promptTokens.size()) {
-                final int[] tokens = new int[promptTokens.size() - promptIndex];
-                for (int i = 0; i < tokens.length; i++) {
+                final int nTokens = Math.min(promptTokens.size() - promptIndex, state.batchsize);
+                final int[] tokens = new int[nTokens];
+                for (int i = 0; i < nTokens; i++) {
                     tokens[i] = promptTokens.get(promptIndex + i);
                     if (echo) {
                         // log prompt token (different color?)
@@ -1148,8 +1145,11 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                     System.out.format("position=%d, promptIdx=%d, promptSize=%d, tokens=%s%n", position, promptIndex, promptTokens.size(), Arrays.toString(tokens));
                 }
                 forward(model, state, tokens, position);
-                position += promptTokens.size() - promptIndex - 1;
-                promptIndex = promptTokens.size();
+                position += nTokens - 1;
+                promptIndex += nTokens;
+                if (promptIndex < promptTokens.size()) {
+                    continue;
+                }
                 startGen = System.nanoTime();
             } else {
                 forward(model, state, new int[] {token}, position);
@@ -1596,12 +1596,11 @@ abstract class FloatTensor {
     void matmul(FloatTensor that, FloatTensor out, int dim0, int dim1) {
         Parallel.parallelFor(0, dim0, i -> out.setFloat(i, dot(i * dim1, that, 0, dim1)));
     }
-    void matmul(FloatTensor[] that, FloatTensor[] out, int dim0, int dim1) {
+    void matmul(int context, FloatTensor[] that, FloatTensor[] out, int dim0, int dim1) {
         if (that.length != out.length) {
             throw new IllegalArgumentException(String.format("that.len=%d, out.len=%d", that.length, out.length));
         }
-        int arrLen = that.length;
-        Parallel.parallelForLong(0, dim0 * arrLen, ti -> {
+        Parallel.parallelForLong(0, dim0 * context, ti -> {
             int idxArr = (int) (ti / dim0);
             int i = (int) (ti % dim0);
             out[idxArr].setFloat(i, dot(i * dim1, that[idxArr], 0, dim1)); 
