@@ -117,7 +117,7 @@ make native
 Or directly:
 
 ```bash
-native-image -H:+UnlockExperimentalVMOptions	-H:+VectorAPISupport -H:+ForeignAPISupport -O3 -march=native --enable-preview --add-modules jdk.incubator.vector --initialize-at-build-time=com.llama4j.FloatTensor -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 -jar llama3.jar -o llama3
+native-image -H:+UnlockExperimentalVMOptions -H:+VectorAPISupport -H:+ForeignAPISupport -O3 -march=native --enable-preview --add-modules jdk.incubator.vector --initialize-at-build-time=com.llama4j.FloatTensor -Djdk.incubator.vector.VECTOR_ACCESS_OOB_CHECK=0 -jar llama3.jar -o llama3
 ```
 
 Run as Native Image:
@@ -140,7 +140,8 @@ It can still run other models, although incurring the usual parsing overhead.
 
 ## Performance
 
-GraalVM now supports more [Vector API](https://openjdk.org/jeps/469) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from [`oracle-graalvm-ea-builds`](https://github.com/graalvm/oracle-graalvm-ea-builds) or sdkman: `sdk install java 24.ea.15-graal`.
+GraalVM now supports more [Vector API](https://openjdk.org/jeps/469) operations. To give it a try, you need GraalVM for JDK 24 – get the EA builds from [`oracle-graalvm-ea-builds`](https://github.com/graalvm/oracle-graalvm-ea-builds) or sdkman: `sdk install java 24.ea.20-graal`.  
+By default, the "preferred" vector size is used, it can be force-set with `-Dllama.VectorBitSize=0|128|256|512`, `0` means disabled.
 
 #### llama.cpp
 
