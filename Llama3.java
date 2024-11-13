@@ -52,8 +52,8 @@ import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 public class Llama3 {
-    /** batch-size used in prompt evaluation */
-    private static final int BATCHSIZE = Integer.getInteger("llama.batchsize", 8);
+    // Batch-size used in prompt evaluation.
+    private static final int BATCH_SIZE = Integer.getInteger("llama.BatchSize", 16);
 
     static Sampler selectSampler(int vocabularySize, float temperature, float topp, long rngSeed) {
         Sampler sampler;
@@ -92,15 +92,23 @@ public class Llama3 {
         }
         int startPosition = 0;
         Scanner in = new Scanner(System.in);
-        while (true) {
+        loop: while (true) {
             System.out.print("> ");
             System.out.flush();
             String userText = in.nextLine();
-            if (List.of("quit", "exit").contains(userText)) {
-                break;
+            switch (userText) {
+                case "/quit":
+                case "/exit": break loop;
+                case "/context": {
+                    System.out.printf("%d out of %d context tokens used (%d tokens remaining)%n",
+                            conversationTokens.size(),
+                            options.maxTokens(),
+                            options.maxTokens() - conversationTokens.size());
+                    continue;
+                }
             }
             if (state == null) {
-                state = model.createNewState(BATCHSIZE);
+                state = model.createNewState(BATCH_SIZE);
             }
             conversationTokens.addAll(chatFormat.encodeMessage(new ChatFormat.Message(ChatFormat.Role.USER, userText)));
             conversationTokens.addAll(chatFormat.encodeHeader(new ChatFormat.Message(ChatFormat.Role.ASSISTANT, "")));
@@ -132,7 +140,7 @@ public class Llama3 {
     }
 
     static void runInstructOnce(Llama model, Sampler sampler, Options options) {
-        Llama.State state = model.createNewState(BATCHSIZE);
+        Llama.State state = model.createNewState(BATCH_SIZE);
         ChatFormat chatFormat = new ChatFormat(model.tokenizer());
 
         List<Integer> promptTokens = new ArrayList<>();
@@ -957,7 +965,6 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         int kvDim = (config.dim * config.numberOfKeyValueHeads) / config.numberOfHeads;
         int kvMul = config.numberOfHeads / config.numberOfKeyValueHeads; // integer multiplier of the kv sharing in multiquery
         float sqrtHeadSize = (float) Math.sqrt(headSize);
-        
         final int nTokens = tokens.length;
 
         // copy the token embedding into x
@@ -1089,7 +1096,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         Parallel.parallelFor(0, nTokens, t -> {
             rmsnorm(state.x[t], state.x[t], weights.rms_final_weight, dim, config.rmsNormEps);
         });
-        
+
         // classifier into logits
         weights.wcls.matmul(state.x[nTokens - 1], state.logits, config.vocabularySize, dim);
         state.idxPrevBlock = nTokens - 1;
@@ -1142,14 +1149,14 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                     System.out.format("position=%d, promptIdx=%d, promptSize=%d, tokens=%s%n", position, promptIndex, promptTokens.size(), Arrays.toString(tokens));
                 }
                 forward(model, state, tokens, position);
-                position += nTokens - 1;
+                position += nTokens - 1; // -1 -> incremented later in the for loop
                 promptIndex += nTokens;
                 if (promptIndex < promptTokens.size()) {
                     continue;
                 }
                 startGen = System.nanoTime();
             } else {
-                forward(model, state, new int[] {token}, position);
+                forward(model, state, new int[]{token}, position);
             }
             nextToken = sampler.sampleToken(state.logits);
             if (echo) {
@@ -1168,10 +1175,8 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
 
         long elapsedNanos = System.nanoTime() - startNanos;
         long promptNanos = startGen - startNanos;
-        long genNanos = elapsedNanos - startGen + startNanos; 
-        int totalTokens = promptIndex + generatedTokens.size();
-        System.err.printf("%n%.2f tokens/s (%d) [PrEval %.2f tokens/s (%d), TokGen %.2f tokens/s (%d)]%n",
-                totalTokens / (elapsedNanos / 1_000_000_000.0), totalTokens,
+        long genNanos = elapsedNanos - startGen + startNanos;
+        System.err.printf("%nprompt: %.2f tokens/s (%d) generation: %.2f tokens/s (%d)%n",
                 promptTokens.size() / (promptNanos / 1_000_000_000.0), promptTokens.size(),
                 generatedTokens.size() / (genNanos / 1_000_000_000.0), generatedTokens.size());
 
@@ -1438,6 +1443,7 @@ final class Parallel {
         }
         IntStream.range(startInclusive, endExclusive).parallel().forEach(action);
     }
+
     public static void parallelForLong(long startInclusive, long endExclusive, LongConsumer action) {
         if (startInclusive == 0 && endExclusive == 1) {
             action.accept(0);
@@ -1595,6 +1601,7 @@ abstract class FloatTensor {
     void matmul(FloatTensor that, FloatTensor out, int dim0, int dim1) {
         Parallel.parallelFor(0, dim0, i -> out.setFloat(i, dot(i * dim1, that, 0, dim1)));
     }
+
     void matmul(int context, FloatTensor[] that, FloatTensor[] out, int dim0, int dim1) {
         if (that.length != out.length) {
             throw new IllegalArgumentException(String.format("that.len=%d, out.len=%d", that.length, out.length));
