@@ -956,7 +956,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         out.mapWithIndexInPlace(0, size, (value, index) -> weight.get(index) * (finalss * x.getFloat(index)));
     }
 
-    static FloatTensor forward(Llama model, State state, int[] tokens, int position) {
+    static FloatTensor forward(Llama model, State state, int[] tokens, int position, boolean computeLogits) {
         // a few convenience variables
         Configuration config = model.configuration();
         Weights weights = model.weights();
@@ -1009,6 +1009,12 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                 state.k[t].copyTo(0, state.keyCache[curLayer], (position + t) * kvDim, kvDim);
                 state.v[t].copyTo(0, state.valueCache[curLayer], (position + t) * kvDim, kvDim);
             });
+
+            // If the logits are not required, the attention and FFN of the last layer can be skipped entirely.
+            if (!computeLogits && curLayer == config.numberOfLayers - 1) {
+                state.idxPrevBlock = nTokens - 1;
+                return null;
+            }
 
             // multihead attention. iterate over all heads
             Parallel.parallelForLong(0, (long) nTokens * (long) config.numberOfHeads, ht -> {
@@ -1136,7 +1142,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         int promptIndex = 0;
         for (int position = startPosition; position < maxTokens; ++position) {
             if (promptIndex < promptTokens.size()) {
-                final int nTokens = Math.min(promptTokens.size() - promptIndex, state.batchsize);
+                final int nTokens = Math.min(maxTokens - position, Math.min(promptTokens.size() - promptIndex, state.batchsize));
                 final int[] tokens = new int[nTokens];
                 for (int i = 0; i < nTokens; i++) {
                     tokens[i] = promptTokens.get(promptIndex + i);
@@ -1148,7 +1154,9 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                 if (echo) {
                     System.out.format("position=%d, promptIdx=%d, promptSize=%d, tokens=%s%n", position, promptIndex, promptTokens.size(), Arrays.toString(tokens));
                 }
-                forward(model, state, tokens, position);
+                // Only compute logits on the very last batch.
+                boolean computeLogits = promptIndex + nTokens >= promptTokens.size();
+                forward(model, state, tokens, position, computeLogits);
                 position += nTokens - 1; // -1 -> incremented later in the for loop
                 promptIndex += nTokens;
                 if (promptIndex < promptTokens.size()) {
@@ -1156,7 +1164,7 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
                 }
                 startGen = System.nanoTime();
             } else {
-                forward(model, state, new int[]{token}, position);
+                forward(model, state, new int[]{token}, position, true);
             }
             nextToken = sampler.sampleToken(state.logits);
             if (echo) {
