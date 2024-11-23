@@ -387,7 +387,6 @@ public class Llama3 {
                 final Llama3.Options options = httpSession.options();
                 final List<Integer> conversationTokens = httpSession.conversationTokens();
                 int startPosition = conversationTokens.size();
-                System.out.format("Tokens1 (start-pos %d): %s%n", startPosition, conversationTokens);
 
                 ChatFormat chatFormat = new ChatFormat(model.tokenizer());
                 chatMessages.stream().map(m -> String.format("[%s]> %s", m.role(), m.content())).forEach(System.out::println);
@@ -1491,10 +1490,10 @@ final class ModelLoader {
     public static Llama loadModel(Path ggufPath, int contextLength, boolean loadWeights) throws IOException {
         GGUF gguf = GGUF.loadModel(ggufPath);
         FileChannel fileChannel = FileChannel.open(ggufPath, StandardOpenOption.READ);
-        return loadModel(fileChannel, gguf, contextLength, loadWeights);
+        return loadModel(ggufPath, fileChannel, gguf, contextLength, loadWeights);
     }
 
-    public static Llama loadModel(FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights) throws IOException {
+    public static Llama loadModel(Path ggufPath, FileChannel fileChannel, GGUF gguf, int contextLength, boolean loadWeights) throws IOException {
         try (var ignored = Timer.log("Load LlaMa model")) {
             Map<String, Object> metadata = gguf.getMetadata();
             Vocabulary vocabulary = loadVocabulary(metadata);
@@ -1521,7 +1520,7 @@ final class ModelLoader {
                 Map<String, GGMLTensorEntry> tensorEntries = GGUF.loadTensors(fileChannel, gguf.getTensorDataOffset(), gguf.getTensorInfos());
                 weights = loadWeights(tensorEntries, config);
             }
-            return new Llama(ggufPath.getFileName().toString().replaceFirst("[.]gguf$", ""), config, tokenizer, qw);
+            return new Llama(ggufPath.getFileName().toString().replaceFirst("[.]gguf$", ""), config, tokenizer, weights);
         }
     }
 
@@ -3103,7 +3102,7 @@ final class AOT {
             try (FileChannel fileChannel = FileChannel.open(path, StandardOpenOption.READ)) {
                 return new PartialModel(
                         path.getFileName().toString(),
-                        ModelLoader.loadModel(fileChannel, gguf, Llama3.Options.DEFAULT_MAX_TOKENS, false),
+                        ModelLoader.loadModel(path, fileChannel, gguf, Llama3.Options.DEFAULT_MAX_TOKENS, false),
                         gguf.getTensorDataOffset(),
                         gguf.getTensorInfos()
                 );
@@ -3135,7 +3134,8 @@ final class AOT {
             // Load only the tensors (mmap slices).
             Map<String, GGMLTensorEntry> tensorEntries = GGUF.loadTensors(fileChannel, preLoaded.tensorDataOffset(), preLoaded.tensorInfos());
             Llama.Weights weights = ModelLoader.loadWeights(tensorEntries, baseModel.configuration());
-            return new Llama(baseModel.configuration().withContextLength(contextLength), baseModel.tokenizer(), weights);
+            return new Llama(modelPath.getFileName().toString().replaceFirst(".gguf$",  ""),
+                    baseModel.configuration().withContextLength(contextLength), baseModel.tokenizer(), weights);
         }
     }
 }
