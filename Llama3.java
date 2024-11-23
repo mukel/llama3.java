@@ -17,6 +17,8 @@
 // a HTTP-server which serves llama.cpp-requests (POST-request /completion).
 // llama.server.path should point to a folder which contains HTML-ressources like those in
 // https://github.com/ggerganov/llama.cpp/tree/master/examples/server/public.
+// The system-property llama.server.path is optional to serve a gui in addition
+// to the chat-completion-API using POST requests.
 //
 // To run just:
 // jbang Llama3.java --help
@@ -338,7 +340,7 @@ public class Llama3 {
                 exchange.close();
                 return;
             }
-            
+
             JsonFormat format = mapRequest.containsKey("messages" ) ? JsonFormat.OPENAI : JsonFormat.LLAMA_CPP;
 
             try {
@@ -612,7 +614,7 @@ public class Llama3 {
         }
         sb.append('"');
     }
-    
+
     static class TeeBufferedReader extends BufferedReader {
         final StringBuilder sb = new StringBuilder();
         /**
