@@ -365,7 +365,7 @@ public class Llama3 {
                     }
                     if (httpSession == null) {
                         // We build a new HTTP-session.
-                        final Llama.State state = model.createNewState();
+                        final Llama.State state = model.createNewState(BATCH_SIZE);
                         sessionKey = "SESS-" + reqCounter.get() + "-" + UUID.randomUUID().toString();
                         exchange.getResponseHeaders().add("Set-Cookie", "LLAMA_SESS_ID=" + sessionKey);
 
