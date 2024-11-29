@@ -91,7 +91,7 @@ chmod +x Llama3.java
 ## Run from source
 
 ```bash
-java --enable-preview --source 21 --add-modules jdk.incubator.vector LLama3.java -i --model Meta-Llama-3-8B-Instruct-Q4_0.gguf
+java --enable-preview --source 21 --add-modules jdk.incubator.vector Llama3.java -i --model Meta-Llama-3-8B-Instruct-Q4_0.gguf
 ```
 
 #### Optional: Makefile + manually build and run
