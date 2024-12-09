@@ -785,6 +785,7 @@ final class ModelLoader {
             //case F32 -> new F32FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case Q8_0 -> new Q8_0FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case Q4_0 -> new Q4_0FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            case BF16 -> new BF16FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             default -> throw new UnsupportedOperationException("Quantization format " + ggmlType);
         };
     }
@@ -1184,7 +1185,8 @@ record Llama(Configuration configuration, Tokenizer tokenizer, Weights weights) 
         long elapsedNanos = System.nanoTime() - startNanos;
         long promptNanos = startGen - startNanos;
         long genNanos = elapsedNanos - startGen + startNanos;
-        System.err.printf("%nprompt: %.2f tokens/s (%d) generation: %.2f tokens/s (%d)%n",
+        System.err.printf("%ncontext: %d/%d prompt: %.2f tokens/s (%d) generation: %.2f tokens/s (%d)%n",
+                startPosition + promptIndex + generatedTokens.size(), model.configuration().contextLength,
                 promptTokens.size() / (promptNanos / 1_000_000_000.0), promptTokens.size(),
                 generatedTokens.size() / (genNanos / 1_000_000_000.0), generatedTokens.size());
 
@@ -1490,9 +1492,31 @@ enum GGMLType {
     Q5_K(2 * Float16.BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 8 + GGMLType.QK_K / 2, GGMLType.QK_K),
     Q6_K(GGMLType.QK_K / 2 + GGMLType.QK_K / 4 + GGMLType.QK_K / 16 + Float16.BYTES, GGMLType.QK_K),
     Q8_K(Integer.MAX_VALUE),
+
+    IQ2_XXS(Integer.MAX_VALUE),
+    IQ2_XS(Integer.MAX_VALUE),
+    IQ3_XXS(Integer.MAX_VALUE),
+    IQ1_S(Integer.MAX_VALUE),
+    IQ4_NL(Integer.MAX_VALUE),
+    IQ3_S(Integer.MAX_VALUE),
+    IQ2_S(Integer.MAX_VALUE),
+    IQ4_XS(Integer.MAX_VALUE),
+
     I8(Byte.BYTES),
     I16(Short.BYTES),
-    I32(Integer.BYTES);
+    I32(Integer.BYTES),
+    I64(Long.BYTES),
+    F64(Double.BYTES),
+    IQ1_M(Integer.MAX_VALUE),
+    BF16(GGMLType.BFLOAT16_BYTES),
+    Q4_0_4_4(GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
+    Q4_0_4_8(GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
+    Q4_0_8_8(GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
+    TQ1_0(Integer.MAX_VALUE),
+    TQ2_0(Integer.MAX_VALUE);
+
+    public static final int BFLOAT16_BYTES = 2;
+    private static final int FLOAT16_BYTES = 2;
 
     private static final GGMLType[] VALUES = values();
 
@@ -1575,9 +1599,22 @@ abstract class FloatTensor {
 
     // Preferred vector size for the fast multiplication routines.
     // (Apple Silicon) NEON only supports up-to 128bit vectors.
-    static final VectorSpecies<Float> F_SPECIES = USE_VECTOR_API
-            ? VectorShape.forBitSize(VECTOR_BIT_SIZE).withLanes(float.class)
-            : null;
+    static final VectorSpecies<Float> F_SPECIES;
+    static final VectorSpecies<Integer> I_SPECIES;
+    static final VectorSpecies<Short> S_SPECIES_HALF;
+
+    static {
+        if (USE_VECTOR_API) {
+            F_SPECIES = VectorShape.forBitSize(VECTOR_BIT_SIZE).withLanes(float.class);
+            I_SPECIES = F_SPECIES.withLanes(int.class);
+            S_SPECIES_HALF = VectorShape.forBitSize(F_SPECIES.vectorBitSize() / 2).withLanes(short.class);
+            assert F_SPECIES.length() == S_SPECIES_HALF.length();
+        } else {
+            F_SPECIES = null;
+            I_SPECIES = null;
+            S_SPECIES_HALF = null;
+        }
+    }
 
     abstract int size();
 
@@ -1966,6 +2003,78 @@ final class Q8_0FloatTensor extends FloatTensor {
         // Remaining entries.
         if (j < size) {
             result += FloatTensor.scalarDot(thiz, thisOffset + j, that, thatOffset + j, size - j);
+        }
+
+        return result;
+    }
+}
+
+final class BF16FloatTensor extends FloatTensor {
+
+    final int size;
+    final MemorySegment memorySegment;
+
+    public BF16FloatTensor(int size, MemorySegment memorySegment) {
+        this.size = size;
+        this.memorySegment = memorySegment;
+    }
+
+    @Override
+    int size() {
+        return size;
+    }
+
+    @Override
+    public void setFloat(int index, float value) {
+        throw new UnsupportedOperationException("setFloat");
+    }
+
+    @Override
+    FloatVector getFloatVector(VectorSpecies<Float> species, int index) {
+        throw new UnsupportedOperationException("getFloatVector");
+    }
+
+    @Override
+    public GGMLType type() {
+        return GGMLType.BF16;
+    }
+
+    @Override
+    public float getFloat(int index) {
+        assert 0 <= index && index < size;
+        return bfloat16ToFloat(readShort(memorySegment, index * GGMLType.BFLOAT16_BYTES));
+    }
+
+    private float bfloat16ToFloat(short bfloat16) {
+        return Float.intBitsToFloat(bfloat16 << 16);
+    }
+
+    @Override
+    public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
+        if (FloatTensor.USE_VECTOR_API) {
+            return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
+        } else {
+            return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
+        }
+    }
+
+    private static float vectorDot(BF16FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
+        assert S_SPECIES_HALF.length() == F_SPECIES.length();
+        FloatVector val = FloatVector.zero(F_SPECIES);
+        int upperBound = F_SPECIES.loopBound(size);
+        for (int i = 0; i < upperBound; i += F_SPECIES.length()) {
+            FloatVector thatVector = that.getFloatVector(F_SPECIES, thatOffset + i);
+            ShortVector bfloat16 = ShortVector.fromMemorySegment(S_SPECIES_HALF, thiz.memorySegment, (thisOffset + i) * (long) GGMLType.BFLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
+            FloatVector thizVector = bfloat16
+                    .castShape(I_SPECIES, 0) // (int) vi
+                    .lanewise(VectorOperators.LSHL, 16) // vi <<= 16
+                    .reinterpretAsFloats(); // Float.intBitsToFloat(vi)
+            val = thizVector.fma(thatVector, val);
+        }
+        float result = val.reduceLanes(VectorOperators.ADD);
+        // Remaining entries.
+        if (upperBound < size) {
+            result += scalarDot(thiz, thisOffset + upperBound, that, thatOffset + upperBound, size - upperBound);
         }
 
         return result;
