@@ -18,8 +18,8 @@ Besides the educational value, this project will be used to test and tune compil
  - Llama 3 tokenizer based on [minbpe](https://github.com/karpathy/minbpe)
  - Llama 3 inference with Grouped-Query Attention
  - Support Llama 3.1 (ad-hoc RoPE scaling) and 3.2 (tie word embeddings)
- - Support for Q8_0 and Q4_0 quantizations
- - Fast matrix-vector multiplication routines for quantized (and BF16) tensors using Java's [Vector API](https://openjdk.org/jeps/469)
+ - Support F16, BF16 weights + Q8_0 and Q4_0 quantizations
+ - Fast matrix-vector multiplication routines using Java's [Vector API](https://openjdk.org/jeps/469)
  - Simple CLI with `--chat` and `--instruct` modes.
  - GraalVM's Native Image support (EA builds [here](https://github.com/graalvm/oracle-graalvm-ea-builds))
  - AOT model pre-loading for instant time-to-first-token
