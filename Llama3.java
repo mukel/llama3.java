@@ -786,6 +786,7 @@ final class ModelLoader {
             case Q8_0 -> new Q8_0FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case Q4_0 -> new Q4_0FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             case BF16 -> new BF16FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
+            case F16 -> new F16FloatTensor(FloatTensor.numberOfElements(entry.shape()), entry.memorySegment());
             default -> throw new UnsupportedOperationException("Quantization format " + ggmlType);
         };
     }
@@ -1470,27 +1471,23 @@ record GGMLTensorEntry(MemorySegment mappedFile, String name, GGMLType ggmlType,
                        MemorySegment memorySegment) {
 }
 
-final class Float16 {
-    public static final int BYTES = 2;
-}
-
 enum GGMLType {
     F32(Float.BYTES),
-    F16(Float16.BYTES),
-    Q4_0(Float16.BYTES + 16 * Byte.BYTES, 32),
-    Q4_1(2 * Float16.BYTES + 16 * Byte.BYTES, 32),
+    F16(GGMLType.FLOAT16_BYTES),
+    Q4_0(GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
+    Q4_1(2 * GGMLType.FLOAT16_BYTES + 16 * Byte.BYTES, 32),
     UNSUPPORTED_Q4_2(Integer.MAX_VALUE), // support has been removed
     UNSUPPORTED_Q4_3(Integer.MAX_VALUE), // support has been removed
     Q5_0(Integer.MAX_VALUE),
     Q5_1(Integer.MAX_VALUE),
-    Q8_0(Float16.BYTES + 32 * Byte.BYTES, 32),
+    Q8_0(GGMLType.FLOAT16_BYTES + 32 * Byte.BYTES, 32),
     Q8_1(32 * Byte.BYTES + 2 * Float.BYTES, 32),
     // k-quantizations
     Q2_K(Integer.MAX_VALUE),
     Q3_K(Integer.MAX_VALUE),
-    Q4_K(2 * Float16.BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 2, GGMLType.QK_K),
-    Q5_K(2 * Float16.BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 8 + GGMLType.QK_K / 2, GGMLType.QK_K),
-    Q6_K(GGMLType.QK_K / 2 + GGMLType.QK_K / 4 + GGMLType.QK_K / 16 + Float16.BYTES, GGMLType.QK_K),
+    Q4_K(2 * GGMLType.FLOAT16_BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 2, GGMLType.QK_K),
+    Q5_K(2 * GGMLType.FLOAT16_BYTES + ((GGMLType.QK_K / 16) / 8 * 6) + GGMLType.QK_K / 8 + GGMLType.QK_K / 2, GGMLType.QK_K),
+    Q6_K(GGMLType.QK_K / 2 + GGMLType.QK_K / 4 + GGMLType.QK_K / 16 + GGMLType.FLOAT16_BYTES, GGMLType.QK_K),
     Q8_K(Integer.MAX_VALUE),
 
     IQ2_XXS(Integer.MAX_VALUE),
@@ -1516,7 +1513,7 @@ enum GGMLType {
     TQ2_0(Integer.MAX_VALUE);
 
     public static final int BFLOAT16_BYTES = 2;
-    private static final int FLOAT16_BYTES = 2;
+    public static final int FLOAT16_BYTES = 2;
 
     private static final GGMLType[] VALUES = values();
 
@@ -1821,9 +1818,9 @@ final class Q4_0FloatTensor extends FloatTensor {
         byte quant;
         int modIndex = index % GGMLType.Q4_0.getBlockSize();
         if (modIndex < GGMLType.Q4_0.getBlockSize() / 2) {
-            quant = (byte) (readByte(memorySegment, blockOffset + Float16.BYTES + modIndex) & 0x0F);
+            quant = (byte) (readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + modIndex) & 0x0F);
         } else {
-            quant = (byte) ((readByte(memorySegment, blockOffset + Float16.BYTES + modIndex - GGMLType.Q4_0.getBlockSize() / 2) >>> 4) & 0x0F);
+            quant = (byte) ((readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + modIndex - GGMLType.Q4_0.getBlockSize() / 2) >>> 4) & 0x0F);
         }
         quant -= 8;
         return quant * scale;
@@ -1857,7 +1854,7 @@ final class Q4_0FloatTensor extends FloatTensor {
         for (; j < upperBound; j += GGMLType.Q4_0.getBlockSize(), blockOffset += GGMLType.Q4_0.getTypeSize()) {
             float wScaleValue = Float.float16ToFloat(readShort(thiz.memorySegment, blockOffset));
             var wScale = FloatVector.broadcast(F_SPECIES, wScaleValue);
-            var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_128, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
+            var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_128, thiz.memorySegment, blockOffset + GGMLType.FLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
             var loBytes = wBytes.and((byte) 0xF).sub((byte) 8);
             var hiBytes = wBytes.lanewise(VectorOperators.LSHR, 4).sub((byte) 8);
             switch (F_SPECIES.vectorBitSize()) {
@@ -1934,7 +1931,7 @@ final class Q8_0FloatTensor extends FloatTensor {
         int blockIndex = index / GGMLType.Q8_0.getBlockSize();
         int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
         int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
-        byte quant = readByte(memorySegment, blockOffset + Float16.BYTES + withinBlockIndex);
+        byte quant = readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + withinBlockIndex);
         float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
         return quant * scale;
     }
@@ -1971,13 +1968,13 @@ final class Q8_0FloatTensor extends FloatTensor {
             var wScale = FloatVector.broadcast(F_SPECIES, wScaleValue);
             switch (F_SPECIES.vectorBitSize()) {
                 case 512 -> {
-                    var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_256, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
+                    var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_256, thiz.memorySegment, blockOffset + GGMLType.FLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
                     var sum0 = that.getFloatVector(F_SPECIES, thatOffset + j + 0 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 0));
                     var sum1 = that.getFloatVector(F_SPECIES, thatOffset + j + 1 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 1));
                     val = sum0.add(sum1).fma(wScale, val);
                 }
                 case 256 -> {
-                    var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_256, thiz.memorySegment, blockOffset + Float16.BYTES, ByteOrder.LITTLE_ENDIAN);
+                    var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_256, thiz.memorySegment, blockOffset + GGMLType.FLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
                     var sum0 = that.getFloatVector(F_SPECIES, thatOffset + j + 0 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 0));
                     var sum1 = that.getFloatVector(F_SPECIES, thatOffset + j + 1 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 1));
                     var sum2 = that.getFloatVector(F_SPECIES, thatOffset + j + 2 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 2));
@@ -1987,7 +1984,7 @@ final class Q8_0FloatTensor extends FloatTensor {
                 case 128 -> {
                     // This loop cannot be unrolled, why?
                     for (int i = 0; i < 2; ++i) {
-                        var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_128, thiz.memorySegment, blockOffset + Float16.BYTES + i * ByteVector.SPECIES_128.vectorByteSize(), ByteOrder.LITTLE_ENDIAN);
+                        var wBytes = ByteVector.fromMemorySegment(ByteVector.SPECIES_128, thiz.memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + i * ByteVector.SPECIES_128.vectorByteSize(), ByteOrder.LITTLE_ENDIAN);
                         var sum0 = that.getFloatVector(F_SPECIES, thatOffset + j + i * 16 + 0 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 0));
                         var sum1 = that.getFloatVector(F_SPECIES, thatOffset + j + i * 16 + 1 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 1));
                         var sum2 = that.getFloatVector(F_SPECIES, thatOffset + j + i * 16 + 2 * F_SPECIES.length()).mul(wBytes.castShape(F_SPECIES, 2));
@@ -2065,10 +2062,111 @@ final class BF16FloatTensor extends FloatTensor {
         for (int i = 0; i < upperBound; i += F_SPECIES.length()) {
             FloatVector thatVector = that.getFloatVector(F_SPECIES, thatOffset + i);
             ShortVector bfloat16 = ShortVector.fromMemorySegment(S_SPECIES_HALF, thiz.memorySegment, (thisOffset + i) * (long) GGMLType.BFLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
+            // BFloat16 to Float32 Conversion:
+            //
+            // ┌─[15]─┬─[14]───····───[7]─┬─[6]────····────[0]─┐
+            // │ Sign │ Exponent (8 bits) │ Mantissa (7 bits)  │ BFloat16 Layout (16 bits)
+            // └──────┴───────────────────┴────────────────────┘
+            //    │             │                    │
+            //    ▼             ▼                    ▼
+            // ┌─[31]─┬─[30]───···───[23]─┬─[22]────···────[0]─┐
+            // │ Sign │ Exponent (8 bits) │ Mantissa (23 bits) │ Float32 Layout (32 bits)
+            // └──────┴───────────────────┴────────────────────┘
             FloatVector thizVector = bfloat16
                     .castShape(I_SPECIES, 0) // (int) vi
                     .lanewise(VectorOperators.LSHL, 16) // vi <<= 16
                     .reinterpretAsFloats(); // Float.intBitsToFloat(vi)
+            val = thizVector.fma(thatVector, val);
+        }
+        float result = val.reduceLanes(VectorOperators.ADD);
+        // Remaining entries.
+        if (upperBound < size) {
+            result += scalarDot(thiz, thisOffset + upperBound, that, thatOffset + upperBound, size - upperBound);
+        }
+
+        return result;
+    }
+}
+
+final class F16FloatTensor extends FloatTensor {
+
+    final int size;
+    final MemorySegment memorySegment;
+
+    public F16FloatTensor(int size, MemorySegment memorySegment) {
+        this.size = size;
+        this.memorySegment = memorySegment;
+    }
+
+    @Override
+    int size() {
+        return size;
+    }
+
+    @Override
+    public void setFloat(int index, float value) {
+        throw new UnsupportedOperationException("setFloat");
+    }
+
+    @Override
+    FloatVector getFloatVector(VectorSpecies<Float> species, int index) {
+        throw new UnsupportedOperationException("getFloatVector");
+    }
+
+    @Override
+    public GGMLType type() {
+        return GGMLType.F16;
+    }
+
+    @Override
+    public float getFloat(int index) {
+        assert 0 <= index && index < size;
+        return Float.float16ToFloat(readShort(memorySegment, index * GGMLType.FLOAT16_BYTES));
+    }
+
+    @Override
+    public float dot(int thisOffset, FloatTensor that, int thatOffset, int size) {
+        if (FloatTensor.USE_VECTOR_API) {
+            return vectorDot(this, thisOffset, (ArrayFloatTensor) that, thatOffset, size);
+        } else {
+            return FloatTensor.scalarDot(this, thisOffset, that, thatOffset, size);
+        }
+    }
+
+    private static float vectorDot(F16FloatTensor thiz, int thisOffset, ArrayFloatTensor that, int thatOffset, int size) {
+        assert S_SPECIES_HALF.length() == F_SPECIES.length();
+        FloatVector val = FloatVector.zero(F_SPECIES);
+        int upperBound = F_SPECIES.loopBound(size);
+        for (int i = 0; i < upperBound; i += F_SPECIES.length()) {
+            FloatVector thatVector = that.getFloatVector(F_SPECIES, thatOffset + i);
+            ShortVector bits16 = ShortVector.fromMemorySegment(S_SPECIES_HALF, thiz.memorySegment, (thisOffset + i) * (long) GGMLType.FLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
+
+            var bits32 = bits16.convertShape(VectorOperators.ZERO_EXTEND_S2I, I_SPECIES, 0).reinterpretAsInts(); // ((int) bits16) & 0xFFFF
+            // Does not support sub-normals, infinities nor NaNs, only for well-formed float16 values (e.g. model weights).
+            // Fast Float16 to Float32 Conversion:
+            //
+            // ┌─[15]─┬─[14]───···───[10]─┬─[9]────····────[0]─┐
+            // │ Sign │ Exponent (5 bits) │ Mantissa (10 bits) │ Float16 Layout (16 bits)
+            // └──────┴───────────────────┴────────────────────┘
+            //    │             │                    │
+            //    ▼             ▼                    ▼
+            // ┌─[31]─┬─[30]───···───[23]─┬─[22]────···────[0]─┐
+            // │ Sign │ Exponent (8 bits) │ Mantissa (23 bits) │ Float32 Layout (32 bits)
+            // └──────┴───────────────────┴────────────────────┘
+            //
+            // Shifts and adjustments:
+            // - Sign:       float16[15] -> float32[31] (shift 16 bits up)
+            // - Exponent:   float16[10-14] -> float32[23-30] (+ bias adjustment)
+            // - Mantissa:   float16[0-9] -> float32[13-22] (shift 13 bits up)
+            //
+            // int bits32 = ((bits16 & 0x8000) << 16) | (((bits16 & 0x7FFF) + 0x1C000) << 13);
+            bits32 = bits32.and(0x8000).lanewise(VectorOperators.LSHL, 16) // sign
+                    .or(
+                            // exponent and mantissa combined
+                            bits32.and(0x7FFF).add(0x1C000).lanewise(VectorOperators.LSHL, 13)
+                    );
+
+            FloatVector thizVector = bits32.reinterpretAsFloats(); // Float.intBitsToFloat(vi)
             val = thizVector.fma(thatVector, val);
         }
         float result = val.reduceLanes(VectorOperators.ADD);
