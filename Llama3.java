@@ -2141,8 +2141,9 @@ final class F16FloatTensor extends FloatTensor {
             FloatVector thatVector = that.getFloatVector(F_SPECIES, thatOffset + i);
             ShortVector bits16 = ShortVector.fromMemorySegment(S_SPECIES_HALF, thiz.memorySegment, (thisOffset + i) * (long) GGMLType.FLOAT16_BYTES, ByteOrder.LITTLE_ENDIAN);
 
-            var bits32 = bits16.convertShape(VectorOperators.ZERO_EXTEND_S2I, I_SPECIES, 0).reinterpretAsInts(); // ((int) bits16) & 0xFFFF
-            // Does not support sub-normals, infinities nor NaNs, only for well-formed float16 values (e.g. model weights).
+            var bits32 = bits16.castShape(I_SPECIES, 0).reinterpretAsInts(); // (int) bits16
+            // Does not support infinities nor NaNs, preserves sign, emulate DAZ (denormals-are-zero).
+            // Expects well-formed float16 values only (e.g. model weights).
             // Fast Float16 to Float32 Conversion:
             //
             // ┌─[15]─┬─[14]───···───[10]─┬─[9]────····────[0]─┐
@@ -2159,11 +2160,15 @@ final class F16FloatTensor extends FloatTensor {
             // - Exponent:   float16[10-14] -> float32[23-30] (+ bias adjustment)
             // - Mantissa:   float16[0-9] -> float32[13-22] (shift 13 bits up)
             //
-            // int bits32 = ((bits16 & 0x8000) << 16) | (((bits16 & 0x7FFF) + 0x1C000) << 13);
+            // exp = bits32 & 0x7C00
+            // zeroExponentMask = exp == 0 ? 0 : ~0
+            var zeroExponentMask = bits32.and(0x7C00).neg().lanewise(VectorOperators.ASHR, 31); // = (-exp) >> 31
             bits32 = bits32.and(0x8000).lanewise(VectorOperators.LSHL, 16) // sign
                     .or(
                             // exponent and mantissa combined
                             bits32.and(0x7FFF).add(0x1C000).lanewise(VectorOperators.LSHL, 13)
+                                    .and(zeroExponentMask) // -0, +0 and DAZ (denormals-are-zero)
+
                     );
 
             FloatVector thizVector = bits32.reinterpretAsFloats(); // Float.intBitsToFloat(vi)
