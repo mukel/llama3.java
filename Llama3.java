@@ -20,7 +20,6 @@
 package com.llama4j;
 
 import jdk.incubator.vector.*;
-import sun.misc.Unsafe;
 
 import java.io.IOException;
 import java.io.PrintStream;
@@ -1568,30 +1567,14 @@ abstract class FloatTensor {
     static final int VECTOR_BIT_SIZE = Integer.getInteger("llama.VectorBitSize", VectorShape.preferredShape().vectorBitSize());
     static final boolean USE_VECTOR_API = VECTOR_BIT_SIZE != 0;
 
-    // static final ValueLayout.OfFloat JAVA_FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
-    // static final ValueLayout.OfShort JAVA_SHORT_LE = ValueLayout.JAVA_SHORT.withOrder(ByteOrder.LITTLE_ENDIAN);
-
-    // The use of Unsafe in this file is a temporary workaround to support native-image.
-    static final Unsafe UNSAFE;
-
-    static {
-        try {
-            Field f = Unsafe.class.getDeclaredField("theUnsafe");
-            f.setAccessible(true);
-            UNSAFE = (Unsafe) f.get(null);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     static short readShort(MemorySegment memorySegment, long offset) {
-        // The MemorySegment.get* methods should be used instead.
-        return UNSAFE.getShort(memorySegment.address() + offset);
+        return memorySegment.get(ValueLayout.JAVA_SHORT, offset);
+        //return UNSAFE.getShort(memorySegment.address() + offset);
     }
 
     static byte readByte(MemorySegment memorySegment, long offset) {
-        // The MemorySegment.get* methods should be used instead.
-        return UNSAFE.getByte(memorySegment.address() + offset);
+        return memorySegment.get(ValueLayout.JAVA_BYTE, offset);
+        //return UNSAFE.getByte(memorySegment.address() + offset);
     }
 
     // Preferred vector size for the fast multiplication routines.
