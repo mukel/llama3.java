@@ -1732,7 +1732,7 @@ abstract class FloatTensor {
 
     abstract int size();
 
-    abstract float getFloat(int index);
+    abstract float getFloat(long index);
 
     abstract void setFloat(int index, float value);
 
@@ -1936,13 +1936,13 @@ final class Q4_0FloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         assert 0 <= index && index < size;
-        int blockIndex = index / GGMLType.Q4_0.getBlockSize();
-        int blockOffset = blockIndex * GGMLType.Q4_0.getTypeSize();
+        long blockIndex = index / GGMLType.Q4_0.getBlockSize();
+        long blockOffset = blockIndex * GGMLType.Q4_0.getTypeSize();
         float scale = readFloat16(memorySegment, blockOffset);
         byte quant;
-        int modIndex = index % GGMLType.Q4_0.getBlockSize();
+        int modIndex = (int) (index % GGMLType.Q4_0.getBlockSize());
         if (modIndex < GGMLType.Q4_0.getBlockSize() / 2) {
             quant = (byte) (readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + modIndex) & 0x0F);
         } else {
@@ -2037,13 +2037,13 @@ final class Q4_1FloatTensor extends FloatTensor {
     @Override public GGMLType type() { return GGMLType.Q4_1; }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         assert 0 <= index && index < size;
-        int blockIndex = index / GGMLType.Q4_1.getBlockSize();
-        int blockOffset = blockIndex * GGMLType.Q4_1.getTypeSize();
+        long blockIndex = index / GGMLType.Q4_1.getBlockSize();
+        long blockOffset = blockIndex * GGMLType.Q4_1.getTypeSize();
         float delta = readFloat16(memorySegment, blockOffset);
         float min = readFloat16(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES);
-        int modIndex = index % GGMLType.Q4_1.getBlockSize();
+        int modIndex = (int) (index % GGMLType.Q4_1.getBlockSize());
         int quant;
         if (modIndex < 16) {
             quant = Byte.toUnsignedInt(readByte(memorySegment, blockOffset + 2L * GGMLType.FLOAT16_BYTES + modIndex)) & 0x0F;
@@ -2170,13 +2170,13 @@ final class Q4_KFloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         // Q4_K block layout (256 values):
         // - d (fp16), dmin (fp16)
         // - scales[12] packed (8 scales + 8 mins, each 6-bit)
         // - qs[128] packed nibbles (two 4-bit quants per byte)
         long blockIndex = index / BLOCK_SIZE;
-        int withinBlock = index % BLOCK_SIZE;
+        int withinBlock = (int) (index % BLOCK_SIZE);
         long blockOffset = blockIndex * TYPE_SIZE;
         float d = readFloat16(memorySegment, blockOffset);
         float dmin = readFloat16(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES);
@@ -2325,10 +2325,10 @@ final class Q5_KFloatTensor extends FloatTensor {
     @Override public GGMLType type() { return GGMLType.Q5_K; }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         // Q5_K extends Q4_K by adding one high bit per quant in qh[32].
         long blockIndex = index / BLOCK_SIZE;
-        int withinBlock = index % BLOCK_SIZE;
+        int withinBlock = (int) (index % BLOCK_SIZE);
         long blockOffset = blockIndex * TYPE_SIZE;
         float d = readFloat16(memorySegment, blockOffset);
         float dmin = readFloat16(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES);
@@ -2480,14 +2480,14 @@ final class Q6_KFloatTensor extends FloatTensor {
     @Override public GGMLType type() { return GGMLType.Q6_K; }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         // Q6_K block layout (256 values):
         // - ql[128]: low 4 bits for two halves
         // - qh[64]: two extra bits per quant
         // - scales[16]: signed int8 per 16-value stripe
         // - d (fp16): shared block scale
         long blockIndex = index / BLOCK_SIZE;
-        int withinBlock = index % BLOCK_SIZE;
+        int withinBlock = (int) (index % BLOCK_SIZE);
         long blockOffset = blockIndex * TYPE_SIZE;
         long qlOff = blockOffset;
         long qhOff = blockOffset + 128;
@@ -2683,11 +2683,11 @@ final class Q8_0FloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         assert 0 <= index && index < size;
-        int blockIndex = index / GGMLType.Q8_0.getBlockSize();
-        int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
-        int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
+        long blockIndex = index / GGMLType.Q8_0.getBlockSize();
+        long withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
+        long blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
         byte quant = readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + withinBlockIndex);
         float scale = readFloat16(memorySegment, blockOffset);
         return quant * scale;
@@ -2794,7 +2794,7 @@ final class BF16FloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         assert 0 <= index && index < size;
         return bfloat16ToFloat(readShort(memorySegment, index * GGMLType.BFLOAT16_BYTES));
     }
@@ -2876,7 +2876,7 @@ final class F16FloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         assert 0 <= index && index < size;
         return readFloat16(memorySegment, index * GGMLType.FLOAT16_BYTES);
     }
@@ -2975,7 +2975,7 @@ final class F32FloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
+    public float getFloat(long index) {
         assert 0 <= index && index < size;
         return readFloat(memorySegment, index * (long) Float.BYTES);
     }
@@ -3025,8 +3025,8 @@ final class ArrayFloatTensor extends FloatTensor {
     }
 
     @Override
-    public float getFloat(int index) {
-        return values[index];
+    public float getFloat(long index) {
+        return values[Math.toIntExact(index)];
     }
 
     @Override
@@ -3175,7 +3175,7 @@ final class ToppSampler implements Sampler {
         // top-p sampling (or "nucleus sampling") samples from the smallest set of
         // tokens that exceed probability topp. This way we never sample tokens that
         // have very low probabilities and are less likely to go "off the rails".
-        Comparator<Integer> comparator = Comparator.comparingDouble(logits::getFloat).reversed();
+        Comparator<Integer> comparator = Comparator.<Integer>comparingDouble(i -> logits.getFloat(i.longValue())).reversed();
 
         int n = logits.size();
         int head = 0;
