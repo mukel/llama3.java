@@ -315,22 +315,107 @@ final class GGUF {
         return metadata;
     }
 
-    private final ByteBuffer BB_1 = ByteBuffer.allocate(Byte.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-    private final ByteBuffer BB_2 = ByteBuffer.allocate(Short.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-    private final ByteBuffer BB_4 = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-    private final ByteBuffer BB_8 = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-    private long parsePosition;
+    private static final class ChannelReader {
+        private final FileChannel channel;
+        private final ByteBuffer buffer;
+        private long position;
+
+        private ChannelReader(FileChannel channel, int bufferSize) {
+            this.channel = channel;
+            this.buffer = ByteBuffer.allocateDirect(bufferSize).order(ByteOrder.LITTLE_ENDIAN);
+            this.buffer.limit(0);
+            this.position = 0L;
+        }
+
+        long position() {
+            return position;
+        }
+
+        private void ensure(int required) throws IOException {
+            if (required > buffer.capacity()) {
+                throw new IllegalArgumentException("Requested read " + required + " exceeds buffer capacity " + buffer.capacity());
+            }
+            if (buffer.remaining() >= required) {
+                return;
+            }
+            buffer.compact();
+            while (buffer.position() < required) {
+                int read = channel.read(buffer);
+                if (read < 0) {
+                    throw new IOException("Unexpected EOF while reading GGUF metadata");
+                }
+            }
+            buffer.flip();
+        }
+
+        byte readByte() throws IOException {
+            ensure(Byte.BYTES);
+            position += Byte.BYTES;
+            return buffer.get();
+        }
+
+        short readShort() throws IOException {
+            ensure(Short.BYTES);
+            position += Short.BYTES;
+            return buffer.getShort();
+        }
+
+        int readInt() throws IOException {
+            ensure(Integer.BYTES);
+            position += Integer.BYTES;
+            return buffer.getInt();
+        }
+
+        long readLong() throws IOException {
+            ensure(Long.BYTES);
+            position += Long.BYTES;
+            return buffer.getLong();
+        }
+
+        float readFloat() throws IOException {
+            return Float.intBitsToFloat(readInt());
+        }
+
+        double readDouble() throws IOException {
+            return Double.longBitsToDouble(readLong());
+        }
+
+        byte[] readBytes(int length) throws IOException {
+            byte[] bytes = new byte[length];
+            int copied = 0;
+            while (copied < length) {
+                if (!buffer.hasRemaining()) {
+                    ensure(1);
+                }
+                int chunk = Math.min(length - copied, buffer.remaining());
+                buffer.get(bytes, copied, chunk);
+                copied += chunk;
+                position += chunk;
+            }
+            return bytes;
+        }
+
+        void skipBytes(int length) throws IOException {
+            int remaining = length;
+            while (remaining > 0) {
+                if (!buffer.hasRemaining()) {
+                    ensure(1);
+                }
+                int chunk = Math.min(remaining, buffer.remaining());
+                buffer.position(buffer.position() + chunk);
+                remaining -= chunk;
+                position += chunk;
+            }
+        }
+    }
 
     public static GGUF loadModel(FileChannel fileChannel, String modelLabel) throws IOException {
         try (var ignored = Timer.log("Parse " + modelLabel)) {
             // A caller may reuse an already-open channel after previous reads; always parse from start.
             fileChannel.position(0L);
             GGUF gguf = new GGUF();
-            ReadableByteChannel channel = Channels.newChannel(
-                    new BufferedInputStream(Channels.newInputStream(fileChannel), PARSE_BUFFER_SIZE)
-            );
-            gguf.parsePosition = 0L;
-            gguf.loadModelImpl(channel);
+            ChannelReader reader = new ChannelReader(fileChannel, PARSE_BUFFER_SIZE);
+            gguf.loadModelImpl(reader);
             return gguf;
         }
     }
@@ -387,24 +472,24 @@ final class GGUF {
         }
     }
 
-    private void loadModelImpl(ReadableByteChannel channel) throws IOException {
+    private void loadModelImpl(ChannelReader reader) throws IOException {
         // The header of the file.
-        readHeader(channel); // gguf_header_t header;
+        readHeader(reader); // gguf_header_t header;
 
         // Tensor infos, which can be used to locate the tensor data.
         // gguf_tensor_info_t tensor_infos[header.tensor_count];
         this.tensorInfos = HashMap.newHashMap(tensorCount);
         for (int i = 0; i < tensorCount; ++i) {
-            GGUF.GGUFTensorInfo ti = readTensorInfo(channel);
+            GGUF.GGUFTensorInfo ti = readTensorInfo(reader);
             assert !tensorInfos.containsKey(ti.name);
             tensorInfos.put(ti.name, ti);
         }
 
         // Padding to the nearest multiple of `ALIGNMENT`.
         // uint8_t _padding[ALIGNMENT - (sizeof(header + tensor_infos) % ALIGNMENT)];
-        long position = parsePosition;
+        long position = reader.position();
         int padding = (int) ((getAlignment() - (position % getAlignment())) % getAlignment());
-        skipBytes(channel, padding);
+        skipBytes(reader, padding);
 
         // Tensor data.
         //
@@ -417,7 +502,7 @@ final class GGUF {
         // The offset of each tensor's data must be a multiple of `ALIGNMENT`, and the space between tensors
         // should be padded to `ALIGNMENT` bytes.
         // uint8_t tensor_data[];
-        this.tensorDataOffset = parsePosition;
+        this.tensorDataOffset = reader.position();
     }
 
     public static Map<String, GGMLTensorEntry> loadTensors(FileChannel fileChannel, long tensorDataOffset, Map<String, GGUFTensorInfo> tensorInfos) throws IOException {
@@ -439,32 +524,32 @@ final class GGUF {
     public record GGUFTensorInfo(String name, int[] dimensions, GGMLType ggmlType, long offset) {
     }
 
-    private GGMLType readGGMLType(ReadableByteChannel channel) throws IOException {
-        int ggmlTypeId = readInt(channel);
+    private GGMLType readGGMLType(ChannelReader reader) throws IOException {
+        int ggmlTypeId = readInt(reader);
         return GGMLType.fromId(ggmlTypeId);
     }
 
-    private GGUF.GGUFTensorInfo readTensorInfo(ReadableByteChannel channel) throws IOException {
+    private GGUF.GGUFTensorInfo readTensorInfo(ChannelReader reader) throws IOException {
         // The name of the tensor. It is a standard GGUF string, with the caveat that
         // it must be at most 64 bytes long.
         // gguf_string_t name;
-        String name = readString(channel);
+        String name = readString(reader);
         assert name.length() <= 64;
 
         // The number of dimensions in the tensor.
         // Currently at most 4, but this may change in the future.
         // uint32_t n_dimensions;
-        int n_dimensions = readInt(channel);
+        int n_dimensions = readInt(reader);
         assert n_dimensions <= 4;
 
         // The dimensions of the tensor.
         int[] dimensions = new int[n_dimensions]; // uint64_t dimensions[n_dimensions];
         for (int i = 0; i < n_dimensions; ++i) {
-            dimensions[i] = Math.toIntExact(readLong(channel));
+            dimensions[i] = Math.toIntExact(readLong(reader));
         }
 
         // The type of the tensor.
-        GGMLType ggmlType = readGGMLType(channel); // ggml_type type;
+        GGMLType ggmlType = readGGMLType(reader); // ggml_type type;
 
         // The offset of the tensor's data in this file in bytes.
         // This offset is relative to `tensor_data`, not to the start
@@ -473,51 +558,51 @@ final class GGUF {
         // file to make it easier to read the data.
         // The offset is relative to the tensor-data section, not file start.
         // Must be a multiple of `ALIGNMENT`.
-        long offset = readLong(channel); // uint64_t offset;
+        long offset = readLong(reader); // uint64_t offset;
         assert offset % getAlignment() == 0;
         return new GGUF.GGUFTensorInfo(name, dimensions, ggmlType, offset);
     }
 
-    private String readString(ReadableByteChannel channel) throws IOException {
+    private String readString(ChannelReader reader) throws IOException {
         // A string in GGUF.
         // The length of the string, in bytes.
-        int len = Math.toIntExact(readLong(channel)); // uint64_t len;
+        int len = Math.toIntExact(readLong(reader)); // uint64_t len;
         // The string as a UTF-8 non-null-terminated string.
         // char string[len];
-        return new String(readBytes(channel, len), StandardCharsets.UTF_8);
+        return new String(readBytes(reader, len), StandardCharsets.UTF_8);
     }
 
-    private Pair<String, Object> readKeyValuePair(ReadableByteChannel channel) throws IOException {
+    private Pair<String, Object> readKeyValuePair(ChannelReader reader) throws IOException {
         // The key of the metadata. It is a standard GGUF string, with the following caveats:
         // - It must be a valid ASCII string.
         // - It must be a hierarchical key, where each segment is `lower_snake_case` and separated by a `.`.
         // - It must be at most 2^16-1/65535 bytes long.
         // Any keys that do not follow these rules are invalid.
         // The key of the metadata. It must be hierarchical lower_snake_case segments separated by '.'.
-        String key = readString(channel); // gguf_string_t key;
+        String key = readString(reader); // gguf_string_t key;
         assert key.length() < (1 << 16);
         assert key.codePoints().allMatch(cp -> ('a' <= cp && cp <= 'z') || ('0' <= cp && cp <= '9') || cp == '_' || cp == '.');
-        Object value = readMetadataValue(channel);
+        Object value = readMetadataValue(reader);
         return new Pair<>(key, value);
     }
 
-    private Object readMetadataValue(ReadableByteChannel channel) throws IOException {
+    private Object readMetadataValue(ChannelReader reader) throws IOException {
         // The type of the value.
         // Must be one of the gguf_metadata_value_type values.
-        MetadataValueType valueType = readMetadataValueType(channel); // gguf_metadata_value_type value_type;
+        MetadataValueType valueType = readMetadataValueType(reader); // gguf_metadata_value_type value_type;
 
         // The value payload itself.
-        return readMetadataValueOfType(valueType, channel); // gguf_metadata_value_t value;
+        return readMetadataValueOfType(valueType, reader); // gguf_metadata_value_t value;
     }
 
-    void readHeader(ReadableByteChannel channel) throws IOException {
+    void readHeader(ChannelReader reader) throws IOException {
         // Magic number to announce that this is a GGUF file.
         // Must be `GGUF` at the byte level: `0x47` `0x47` `0x55` `0x46`.
         // Your executor might do little-endian byte order, so it might be
         // check for 0x46554747 and letting the endianness cancel out.
         // Consider being *very* explicit about the byte order here.
         // Some readers may check for 0x46554747 on little-endian machines.
-        this.magic = readInt(channel); // uint32_t magic;
+        this.magic = readInt(reader); // uint32_t magic;
         if (magic != GGUF_MAGIC) {
             throw new IllegalArgumentException("unsupported header.magic " + magic);
         }
@@ -530,7 +615,7 @@ final class GGUF {
         // to signify the change.
         // Must be 3 for the latest format in the GGUF spec.
         // This version should only be increased for structural file-format changes.
-        this.version = readInt(channel); // uint32_t version;
+        this.version = readInt(reader); // uint32_t version;
         if (!SUPPORTED_GGUF_VERSIONS.contains(version)) {
             throw new IllegalArgumentException("unsupported header.version " + version);
         }
@@ -539,73 +624,73 @@ final class GGUF {
         // This is explicit, instead of being included in the metadata, to ensure it is always present
         // for loading the tensors.
         // This is explicit to make tensor loading possible without metadata lookup.
-        this.tensorCount = Math.toIntExact(readLong(channel)); // uint64_t tensor_count;
+        this.tensorCount = Math.toIntExact(readLong(reader)); // uint64_t tensor_count;
 
         // The number of metadata key-value pairs.
-        this.metadata_kv_count = Math.toIntExact(readLong(channel)); // uint64_t metadata_kv_count;
+        this.metadata_kv_count = Math.toIntExact(readLong(reader)); // uint64_t metadata_kv_count;
 
         // The metadata key-value pairs.
         this.metadata = HashMap.newHashMap(metadata_kv_count); // gguf_metadata_kv_t metadata_kv[metadata_kv_count];
         for (int i = 0; i < metadata_kv_count; ++i) {
-            Pair<String, Object> keyValue = readKeyValuePair(channel);
+            Pair<String, Object> keyValue = readKeyValuePair(reader);
             assert !metadata.containsKey(keyValue.first());
             metadata.put(keyValue.first(), keyValue.second());
         }
     }
 
-    private Object readArray(ReadableByteChannel channel) throws IOException {
+    private Object readArray(ChannelReader reader) throws IOException {
         // Any value type is valid, including arrays.
         // Any metadata value type is valid, including nested arrays.
-        MetadataValueType valueType = readMetadataValueType(channel); // gguf_metadata_value_type type;
+        MetadataValueType valueType = readMetadataValueType(reader); // gguf_metadata_value_type type;
 
         // Number of elements, not bytes
-        int len = Math.toIntExact(readLong(channel)); // uint64_t len;
+        int len = Math.toIntExact(readLong(reader)); // uint64_t len;
 
         // The array of values.
         // gguf_metadata_value_t array[len];
         switch (valueType) {
             case UINT8, INT8 -> {
-                return readBytes(channel, len);
+                return readBytes(reader, len);
             }
             case UINT16, INT16 -> {
                 short[] shorts = new short[len];
                 for (int i = 0; i < len; ++i) {
-                    shorts[i] = readShort(channel);
+                    shorts[i] = readShort(reader);
                 }
                 return shorts;
             }
             case UINT32, INT32 -> {
                 int[] ints = new int[len];
                 for (int i = 0; i < len; ++i) {
-                    ints[i] = readInt(channel);
+                    ints[i] = readInt(reader);
                 }
                 return ints;
             }
             case FLOAT32 -> {
                 float[] floats = new float[len];
                 for (int i = 0; i < len; ++i) {
-                    floats[i] = readFloat(channel);
+                    floats[i] = readFloat(reader);
                 }
                 return floats;
             }
             case BOOL -> {
                 boolean[] booleans = new boolean[len];
                 for (int i = 0; i < len; ++i) {
-                    booleans[i] = readBoolean(channel);
+                    booleans[i] = readBoolean(reader);
                 }
                 return booleans;
             }
             case STRING -> {
                 String[] strings = new String[len];
                 for (int i = 0; i < len; ++i) {
-                    strings[i] = readString(channel);
+                    strings[i] = readString(reader);
                 }
                 return strings;
             }
             case ARRAY -> {
                 Object[] arrays = new Object[len];
                 for (int i = 0; i < len; ++i) {
-                    arrays[i] = readArray(channel);
+                    arrays[i] = readArray(reader);
                 }
                 return arrays;
             }
@@ -613,86 +698,59 @@ final class GGUF {
         }
     }
 
-    private Object readMetadataValueOfType(MetadataValueType valueType, ReadableByteChannel channel) throws IOException {
+    private Object readMetadataValueOfType(MetadataValueType valueType, ChannelReader reader) throws IOException {
         return switch (valueType) {
-            case UINT8, INT8 -> readByte(channel);
-            case UINT16, INT16 -> readShort(channel);
-            case UINT32, INT32 -> readInt(channel);
-            case FLOAT32 -> readFloat(channel);
-            case UINT64, INT64 -> readLong(channel);
-            case FLOAT64 -> readDouble(channel);
-            case BOOL -> readBoolean(channel);
-            case STRING -> readString(channel);
-            case ARRAY -> readArray(channel);
+            case UINT8, INT8 -> readByte(reader);
+            case UINT16, INT16 -> readShort(reader);
+            case UINT32, INT32 -> readInt(reader);
+            case FLOAT32 -> readFloat(reader);
+            case UINT64, INT64 -> readLong(reader);
+            case FLOAT64 -> readDouble(reader);
+            case BOOL -> readBoolean(reader);
+            case STRING -> readString(reader);
+            case ARRAY -> readArray(reader);
         };
     }
 
-    private MetadataValueType readMetadataValueType(ReadableByteChannel channel) throws IOException {
-        int index = readInt(channel);
+    private MetadataValueType readMetadataValueType(ChannelReader reader) throws IOException {
+        int index = readInt(reader);
         return MetadataValueType.fromIndex(index);
     }
 
-    private byte[] readBytes(ReadableByteChannel channel, int length) throws IOException {
-        byte[] bytes = new byte[length];
-        readFully(channel, ByteBuffer.wrap(bytes));
-        return bytes;
+    private byte[] readBytes(ChannelReader reader, int length) throws IOException {
+        return reader.readBytes(length);
     }
 
-    private void skipBytes(ReadableByteChannel channel, int length) throws IOException {
-        int remaining = length;
-        byte[] scratch = new byte[Math.min(length, 1 << 12)];
-        while (remaining > 0) {
-            int chunk = Math.min(remaining, scratch.length);
-            readFully(channel, ByteBuffer.wrap(scratch, 0, chunk));
-            remaining -= chunk;
-        }
+    private void skipBytes(ChannelReader reader, int length) throws IOException {
+        reader.skipBytes(length);
     }
 
-    private void readFully(ReadableByteChannel channel, ByteBuffer byteBuffer) throws IOException {
-        int expected = byteBuffer.remaining();
-        while (byteBuffer.hasRemaining()) {
-            int bytesRead = channel.read(byteBuffer);
-            if (bytesRead < 0) {
-                throw new IOException("Unexpected EOF while reading GGUF metadata");
-            }
-        }
-        parsePosition += expected;
+    private byte readByte(ChannelReader reader) throws IOException {
+        return reader.readByte();
     }
 
-    private byte readByte(ReadableByteChannel channel) throws IOException {
-        BB_1.clear();
-        readFully(channel, BB_1);
-        return BB_1.get(0);
+    private boolean readBoolean(ChannelReader reader) throws IOException {
+        return readByte(reader) != 0;
     }
 
-    private boolean readBoolean(ReadableByteChannel channel) throws IOException {
-        return readByte(channel) != 0;
+    private short readShort(ChannelReader reader) throws IOException {
+        return reader.readShort();
     }
 
-    private short readShort(ReadableByteChannel channel) throws IOException {
-        BB_2.clear();
-        readFully(channel, BB_2);
-        return BB_2.getShort(0);
+    private int readInt(ChannelReader reader) throws IOException {
+        return reader.readInt();
     }
 
-    private int readInt(ReadableByteChannel channel) throws IOException {
-        BB_4.clear();
-        readFully(channel, BB_4);
-        return BB_4.getInt(0);
+    private long readLong(ChannelReader reader) throws IOException {
+        return reader.readLong();
     }
 
-    private long readLong(ReadableByteChannel channel) throws IOException {
-        BB_8.clear();
-        readFully(channel, BB_8);
-        return BB_8.getLong(0);
+    private float readFloat(ChannelReader reader) throws IOException {
+        return reader.readFloat();
     }
 
-    private float readFloat(ReadableByteChannel channel) throws IOException {
-        return Float.intBitsToFloat(readInt(channel));
-    }
-
-    private double readDouble(ReadableByteChannel channel) throws IOException {
-        return Double.longBitsToDouble(readLong(channel));
+    private double readDouble(ChannelReader reader) throws IOException {
+        return reader.readDouble();
     }
 
     public int getAlignment() {
