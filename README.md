@@ -144,6 +144,13 @@ Hardware specs: 2019 AMD Ryzen 3950X 16C/32T 64GB (3800) Linux 6.6.47.
   <img src="https://github.com/user-attachments/assets/7f36f26a-6a78-46b7-9067-fcbe7717aa44">
 </p>
 
+## Related Repositories
+
+- [llama3.java](https://github.com/mukel/llama3.java)
+- [gemma4.java](https://github.com/mukel/gemma4.java)
+- [gptoss.java](https://github.com/mukel/gptoss.java)
+- [qwen35.java](https://github.com/mukel/qwen35.java)
+
 ## License
 
 MIT
