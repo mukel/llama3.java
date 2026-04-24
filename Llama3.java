@@ -3266,7 +3266,7 @@ final class ToppSampler implements Sampler {
                 lastIndex = i;
                 break; // we've exceeded topp by including lastIndex
             }
-            siftDown(indices, 0, i - 1, comparator);
+            siftDown(indices, 0, i, comparator);
         }
 
         // sample from the truncated list
